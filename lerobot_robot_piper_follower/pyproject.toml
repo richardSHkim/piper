@@ -7,7 +7,7 @@ authors = [
     { name = "richardSHkim", email = "shkim@superb-ai.com" }
 ]
 requires-python = ">=3.11"
-dependencies = ["lerobot", "piper_sdk"]
+dependencies = ["lerobot==0.4.3", "piper_sdk==0.6.1"]
 
 [project.scripts]
 lerobot-robot-piper-follower = "lerobot_robot_piper_follower:main"
