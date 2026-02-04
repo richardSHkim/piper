@@ -1,0 +1,17 @@
+[project]
+name = "lerobot-teleoperator-piper-leader"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+authors = [
+    { name = "richardSHkim", email = "shkim@superb-ai.com" }
+]
+requires-python = ">=3.11"
+dependencies = []
+
+[project.scripts]
+lerobot-teleoperator-piper-leader = "lerobot_teleoperator_piper_leader:main"
+
+[build-system]
+requires = ["uv_build>=0.9.9,<0.10.0"]
+build-backend = "uv_build"
