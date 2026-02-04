@@ -36,8 +36,8 @@ def main() -> None:
     parser = argparse.ArgumentParser(
         description="Teleoperate two Piper arms on different CAN interfaces."
     )
-    parser.add_argument("--leader-can", default="can0", help="Leader CAN name")
-    parser.add_argument("--follower-can", default="can1", help="Follower CAN name")
+    parser.add_argument("--leader-can", default="can_leader", help="Leader CAN name")
+    parser.add_argument("--follower-can", default="can_follower", help="Follower CAN name")
     parser.add_argument(
         "--source-mode",
         choices=["feedback", "control"],
