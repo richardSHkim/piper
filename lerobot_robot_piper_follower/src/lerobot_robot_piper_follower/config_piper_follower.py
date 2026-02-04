@@ -17,5 +17,3 @@ class PiperFollowerConfig(RobotConfig):
     gripper_opening_m: float = 0.07
     startup_enable_timeout_s: float = 5.0
     disable_on_disconnect: bool = True
-    max_delta_translation_m: float = 0.01
-    max_delta_rotation_rad: float = 0.08726646259971647  # 5 deg

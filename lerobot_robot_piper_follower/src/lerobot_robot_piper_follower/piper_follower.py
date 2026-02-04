@@ -17,8 +17,6 @@ RAD_TO_001DEG = 180000.0 / math.pi
 _001DEG_TO_RAD = math.pi / 180000.0
 M_TO_001MM = 1_000_000.0
 _001MM_TO_M = 1.0 / 1_000_000.0
-RAD_TO_001DEG_EE = RAD_TO_001DEG
-_001DEG_TO_RAD_EE = _001DEG_TO_RAD
 
 
 def _clamp(x: float, lo: float, hi: float) -> float:
@@ -53,13 +51,13 @@ class PiperFollower(Robot):
     @cached_property
     def action_features(self) -> dict[str, type]:
         return {
-            "delta_x": float,
-            "delta_y": float,
-            "delta_z": float,
-            "delta_rx": float,
-            "delta_ry": float,
-            "delta_rz": float,
-            "gripper": float,
+            "joint_1.pos": float,
+            "joint_2.pos": float,
+            "joint_3.pos": float,
+            "joint_4.pos": float,
+            "joint_5.pos": float,
+            "joint_6.pos": float,
+            "gripper.pos": float,
         }
 
     @property
@@ -111,17 +109,6 @@ class PiperFollower(Robot):
             float(joints.joint_6) * _001DEG_TO_RAD,
         ]
 
-    def _read_ee_pose(self) -> tuple[float, float, float, float, float, float]:
-        ee = self._arm.GetArmEndPoseMsgs().end_pose
-        return (
-            float(ee.X_axis) * _001MM_TO_M,
-            float(ee.Y_axis) * _001MM_TO_M,
-            float(ee.Z_axis) * _001MM_TO_M,
-            float(ee.RX_axis) * _001DEG_TO_RAD_EE,
-            float(ee.RY_axis) * _001DEG_TO_RAD_EE,
-            float(ee.RZ_axis) * _001DEG_TO_RAD_EE,
-        )
-
     def _read_gripper_ratio(self) -> float:
         raw = float(self._arm.GetArmGripperMsgs().gripper_state.grippers_angle) * _001MM_TO_M
         return _clamp(raw / self.config.gripper_opening_m, 0.0, 1.0)
@@ -146,77 +133,50 @@ class PiperFollower(Robot):
         self._arm.GripperCtrl(abs(stroke_001mm), int(self.config.gripper_effort), 0x01, 0x00)
         return ratio
 
-    def _send_delta_ee(self, action: RobotAction) -> RobotAction:
-        x, y, z, rx, ry, rz = self._read_ee_pose()
+    def _send_joint_action(self, action: RobotAction) -> RobotAction:
+        curr = self._read_joint_rad()
+        targets = [
+            float(action.get("joint_1.pos", curr[0])),
+            float(action.get("joint_2.pos", curr[1])),
+            float(action.get("joint_3.pos", curr[2])),
+            float(action.get("joint_4.pos", curr[3])),
+            float(action.get("joint_5.pos", curr[4])),
+            float(action.get("joint_6.pos", curr[5])),
+        ]
 
-        dx = _clamp(
-            float(action.get("delta_x", action.get("target_x", 0.0))),
-            -self.config.max_delta_translation_m,
-            self.config.max_delta_translation_m,
-        )
-        dy = _clamp(
-            float(action.get("delta_y", action.get("target_y", 0.0))),
-            -self.config.max_delta_translation_m,
-            self.config.max_delta_translation_m,
-        )
-        dz = _clamp(
-            float(action.get("delta_z", action.get("target_z", 0.0))),
-            -self.config.max_delta_translation_m,
-            self.config.max_delta_translation_m,
-        )
-        drx = _clamp(
-            float(action.get("delta_rx", action.get("target_wx", 0.0))),
-            -self.config.max_delta_rotation_rad,
-            self.config.max_delta_rotation_rad,
-        )
-        dry = _clamp(
-            float(action.get("delta_ry", action.get("target_wy", 0.0))),
-            -self.config.max_delta_rotation_rad,
-            self.config.max_delta_rotation_rad,
-        )
-        drz = _clamp(
-            float(action.get("delta_rz", action.get("target_wz", 0.0))),
-            -self.config.max_delta_rotation_rad,
-            self.config.max_delta_rotation_rad,
+        self._arm.MotionCtrl_2(0x01, 0x01, int(self.config.speed_ratio), 0x00)
+        self._arm.JointCtrl(
+            int(round(targets[0] * RAD_TO_001DEG)),
+            int(round(targets[1] * RAD_TO_001DEG)),
+            int(round(targets[2] * RAD_TO_001DEG)),
+            int(round(targets[3] * RAD_TO_001DEG)),
+            int(round(targets[4] * RAD_TO_001DEG)),
+            int(round(targets[5] * RAD_TO_001DEG)),
         )
 
-        tx = x + dx
-        ty = y + dy
-        tz = z + dz
-        trx = rx + drx
-        try_ = ry + dry
-        trz = rz + drz
-
-        self._arm.MotionCtrl_2(0x01, 0x00, int(self.config.speed_ratio), 0x00)
-        self._arm.EndPoseCtrl(
-            int(round(tx * M_TO_001MM)),
-            int(round(ty * M_TO_001MM)),
-            int(round(tz * M_TO_001MM)),
-            int(round(trx * RAD_TO_001DEG_EE)),
-            int(round(try_ * RAD_TO_001DEG_EE)),
-            int(round(trz * RAD_TO_001DEG_EE)),
-        )
-
-        sent: RobotAction = {
-            "ee.x": tx,
-            "ee.y": ty,
-            "ee.z": tz,
-            "ee.rx": trx,
-            "ee.ry": try_,
-            "ee.rz": trz,
-        }
-        if "gripper" in action:
-            sent["gripper.pos"] = self._set_gripper(float(action["gripper"]))
+        sent: RobotAction = {f"joint_{i + 1}.pos": targets[i] for i in range(6)}
+        if "gripper.pos" in action:
+            sent["gripper.pos"] = self._set_gripper(float(action["gripper.pos"]))
         return sent
 
     @check_if_not_connected
     def send_action(self, action: RobotAction) -> RobotAction:
-        if any(k in action for k in ("delta_x", "delta_y", "delta_z", "target_x", "target_y", "target_z")):
-            return self._send_delta_ee(action)
+        if any(
+            k in action
+            for k in (
+                "joint_1.pos",
+                "joint_2.pos",
+                "joint_3.pos",
+                "joint_4.pos",
+                "joint_5.pos",
+                "joint_6.pos",
+            )
+        ):
+            return self._send_joint_action(action)
 
         raise ValueError(
             "Unsupported action schema for piper_follower. "
-            "Use delta_(x,y,z,rx,ry,rz) (+ optional gripper)."
+            "Use joint_1.pos..joint_6.pos (+ optional gripper.pos)."
         )
 
     @check_if_not_connected

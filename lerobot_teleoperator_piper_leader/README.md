@@ -4,8 +4,8 @@ LeRobot teleoperator plugin for AgileX PiPER leader arm (CAN based).
 
 ### Output action schema
 
-- `delta_x delta_y delta_z delta_rx delta_ry delta_rz` (m/rad)
-- `gripper` (normalized 0..1)
+- `joint_1.pos ... joint_6.pos` (rad)
+- `gripper.pos` (normalized 0..1)
 
 ### Minimal config example
 
