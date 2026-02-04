@@ -2,11 +2,14 @@
 
 LeRobot robot plugin for AgileX PiPER follower arm (CAN based).
 
-### Supported action schemas
+### Action schema
 
-- Joint absolute: `joint_1.pos` ... `joint_6.pos` (+ optional `gripper.pos`), unit: rad.
-- End-effector absolute: `ee.x ee.y ee.z ee.rx ee.ry ee.rz` (+ optional `gripper.pos`), unit: m/rad.
 - End-effector delta: `delta_x delta_y delta_z delta_rx delta_ry delta_rz` (+ optional `gripper`), unit: m/rad.
+
+### Observation schema
+
+- Joint state: `joint_1.pos ... joint_6.pos` (rad)
+- Gripper: `gripper.pos` (0..1)
 
 ### Minimal config example
 

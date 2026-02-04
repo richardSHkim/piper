@@ -32,17 +32,18 @@ class PiperLeader(Teleoperator):
         self.config = config
         self._arm = None
         self._connected = False
+        self._last_ee: tuple[float, float, float, float, float, float] | None = None
 
     @cached_property
     def action_features(self) -> dict[str, type]:
         return {
-            "joint_1.pos": float,
-            "joint_2.pos": float,
-            "joint_3.pos": float,
-            "joint_4.pos": float,
-            "joint_5.pos": float,
-            "joint_6.pos": float,
-            "gripper.pos": float,
+            "delta_x": float,
+            "delta_y": float,
+            "delta_z": float,
+            "delta_rx": float,
+            "delta_ry": float,
+            "delta_rz": float,
+            "gripper": float,
         }
 
     @cached_property
@@ -75,26 +76,50 @@ class PiperLeader(Teleoperator):
     def configure(self) -> None:
         if self.config.hand_guiding:
             self._arm.DisableArm(7)
+        self._last_ee = self._read_ee_pose()
+
+    def _read_ee_pose(self) -> tuple[float, float, float, float, float, float]:
+        ee = self._arm.GetArmEndPoseMsgs().end_pose
+        return (
+            float(ee.X_axis) * _001MM_TO_M,
+            float(ee.Y_axis) * _001MM_TO_M,
+            float(ee.Z_axis) * _001MM_TO_M,
+            float(ee.RX_axis) * _001DEG_TO_RAD,
+            float(ee.RY_axis) * _001DEG_TO_RAD,
+            float(ee.RZ_axis) * _001DEG_TO_RAD,
+        )
 
     @check_if_not_connected
     def get_action(self) -> RobotAction:
+        ee_now = self._read_ee_pose()
+        if self._last_ee is None:
+            self._last_ee = ee_now
+
+        delta = [ee_now[i] - self._last_ee[i] for i in range(6)]
+        self._last_ee = ee_now
+
+        delta[0] = _clamp(delta[0], -self.config.max_delta_translation_m, self.config.max_delta_translation_m)
+        delta[1] = _clamp(delta[1], -self.config.max_delta_translation_m, self.config.max_delta_translation_m)
+        delta[2] = _clamp(delta[2], -self.config.max_delta_translation_m, self.config.max_delta_translation_m)
+        delta[3] = _clamp(delta[3], -self.config.max_delta_rotation_rad, self.config.max_delta_rotation_rad)
+        delta[4] = _clamp(delta[4], -self.config.max_delta_rotation_rad, self.config.max_delta_rotation_rad)
+        delta[5] = _clamp(delta[5], -self.config.max_delta_rotation_rad, self.config.max_delta_rotation_rad)
+
         if self.config.source_mode == "control":
-            joints = self._arm.GetArmJointCtrl().joint_ctrl
             gripper = self._arm.GetArmGripperCtrl().gripper_ctrl
             gripper_raw = float(gripper.grippers_angle)
         else:
-            joints = self._arm.GetArmJointMsgs().joint_state
             gripper = self._arm.GetArmGripperMsgs().gripper_state
             gripper_raw = float(gripper.grippers_angle)
 
         return {
-            "joint_1.pos": float(joints.joint_1) * _001DEG_TO_RAD,
-            "joint_2.pos": float(joints.joint_2) * _001DEG_TO_RAD,
-            "joint_3.pos": float(joints.joint_3) * _001DEG_TO_RAD,
-            "joint_4.pos": float(joints.joint_4) * _001DEG_TO_RAD,
-            "joint_5.pos": float(joints.joint_5) * _001DEG_TO_RAD,
-            "joint_6.pos": float(joints.joint_6) * _001DEG_TO_RAD,
-            "gripper.pos": _clamp((gripper_raw * _001MM_TO_M) / self.config.gripper_opening_m, 0.0, 1.0),
+            "delta_x": delta[0],
+            "delta_y": delta[1],
+            "delta_z": delta[2],
+            "delta_rx": delta[3],
+            "delta_ry": delta[4],
+            "delta_rz": delta[5],
+            "gripper": _clamp((gripper_raw * _001MM_TO_M) / self.config.gripper_opening_m, 0.0, 1.0),
         }
 
     def send_feedback(self, feedback: dict[str, Any]) -> None:
