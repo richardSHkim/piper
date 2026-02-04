@@ -1,13 +1,13 @@
 [project]
-name = "lerobot-robot-piper-follower"
+name = "lerobot_robot_piper_follower"
 version = "0.1.0"
-description = "Add your description here"
+description = "LeRobot Robot plugin for AgileX PiPER follower arm"
 readme = "README.md"
 authors = [
     { name = "richardSHkim", email = "shkim@superb-ai.com" }
 ]
 requires-python = ">=3.11"
-dependencies = []
+dependencies = ["lerobot", "piper_sdk"]
 
 [project.scripts]
 lerobot-robot-piper-follower = "lerobot_robot_piper_follower:main"
