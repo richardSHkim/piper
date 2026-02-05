@@ -5,6 +5,7 @@ import math
 import time
 from functools import cached_property
 
+from lerobot.cameras.utils import make_cameras_from_configs
 from lerobot.processor import RobotAction, RobotObservation
 from lerobot.robots.robot import Robot
 from lerobot.utils.decorators import check_if_already_connected, check_if_not_connected
@@ -34,10 +35,16 @@ class PiperFollower(Robot):
         self.config = config
         self._arm = None
         self._connected = False
-        self.cameras = {}
+        self.cameras = make_cameras_from_configs(config.cameras)
+
+    @property
+    def _cameras_ft(self) -> dict[str, tuple]:
+        return {
+            cam: (self.config.cameras[cam].height, self.config.cameras[cam].width, 3) for cam in self.cameras
+        }
 
     @cached_property
-    def observation_features(self) -> dict[str, type]:
+    def observation_features(self) -> dict[str, type | tuple]:
         return {
             "joint_1.pos": float,
             "joint_2.pos": float,
@@ -46,6 +53,7 @@ class PiperFollower(Robot):
             "joint_5.pos": float,
             "joint_6.pos": float,
             "gripper.pos": float,
+            **self._cameras_ft,
         }
 
     @cached_property
@@ -62,7 +70,7 @@ class PiperFollower(Robot):
 
     @property
     def is_connected(self) -> bool:
-        return self._connected
+        return self._connected and all(cam.is_connected for cam in self.cameras.values())
 
     @check_if_already_connected
     def connect(self, calibrate: bool = True) -> None:
@@ -72,6 +80,8 @@ class PiperFollower(Robot):
         self._arm = C_PiperInterface_V2(self.config.can_name, self.config.judge_flag)
         self._arm.ConnectPort()
         self._connected = True
+        for cam in self.cameras.values():
+            cam.connect()
         self.configure()
         logger.info("%s connected on %s", self.name, self.config.can_name)
 
@@ -117,7 +127,7 @@ class PiperFollower(Robot):
     def get_observation(self) -> RobotObservation:
         joints = self._read_joint_rad()
         gripper = self._read_gripper_ratio()
-        return {
+        obs_dict: RobotObservation = {
             "joint_1.pos": joints[0],
             "joint_2.pos": joints[1],
             "joint_3.pos": joints[2],
@@ -126,6 +136,10 @@ class PiperFollower(Robot):
             "joint_6.pos": joints[5],
             "gripper.pos": gripper,
         }
+        for cam_key, cam in self.cameras.items():
+            obs_dict[cam_key] = cam.async_read()
+
+        return obs_dict
 
     def _set_gripper(self, ratio: float) -> float:
         ratio = _clamp(float(ratio), 0.0, 1.0)
@@ -185,6 +199,9 @@ class PiperFollower(Robot):
             if self.config.disable_on_disconnect:
                 self._arm.DisableArm(7)
         finally:
-            self._arm.DisconnectPort()
+            for cam in self.cameras.values():
+                cam.disconnect()
+            if self._arm is not None:
+                self._arm.DisconnectPort()
             self._connected = False
             logger.info("%s disconnected", self.name)
