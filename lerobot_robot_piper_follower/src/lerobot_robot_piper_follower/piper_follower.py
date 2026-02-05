@@ -38,6 +38,18 @@ class PiperFollower(Robot):
         self.cameras = make_cameras_from_configs(config.cameras)
 
     @property
+    def _motors_ft(self) -> dict[str, type]:
+        return {
+            "joint_1.pos": float,
+            "joint_2.pos": float,
+            "joint_3.pos": float,
+            "joint_4.pos": float,
+            "joint_5.pos": float,
+            "joint_6.pos": float,
+            "gripper.pos": float,
+        }
+
+    @property
     def _cameras_ft(self) -> dict[str, tuple]:
         return {
             cam: (self.config.cameras[cam].height, self.config.cameras[cam].width, 3) for cam in self.cameras
@@ -45,28 +57,11 @@ class PiperFollower(Robot):
 
     @cached_property
     def observation_features(self) -> dict[str, type | tuple]:
-        return {
-            "joint_1.pos": float,
-            "joint_2.pos": float,
-            "joint_3.pos": float,
-            "joint_4.pos": float,
-            "joint_5.pos": float,
-            "joint_6.pos": float,
-            "gripper.pos": float,
-            **self._cameras_ft,
-        }
+        return {**self._motors_ft, **self._cameras_ft}
 
     @cached_property
     def action_features(self) -> dict[str, type]:
-        return {
-            "joint_1.pos": float,
-            "joint_2.pos": float,
-            "joint_3.pos": float,
-            "joint_4.pos": float,
-            "joint_5.pos": float,
-            "joint_6.pos": float,
-            "gripper.pos": float,
-        }
+        return self._motors_ft
 
     @property
     def is_connected(self) -> bool:
