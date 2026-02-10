@@ -13,7 +13,8 @@ try:
     devices = dev.get_tracker_devices()
     print("tracker devices:", devices)
 
-    for i in range(10):
+    i = 0
+    while True:
         enc = dev.get_encoder_data()
         cmd = dev.get_command_state()
         dist = dev.get_gripper_distance()
@@ -23,10 +24,13 @@ try:
             pose = f"pose_error={e}"
 
         print(
-            f"[{i}] rad={enc['rad']:.4f}, angle={enc['angle']:.2f}, "
+            f"rad={enc['rad']:.4f}, angle={enc['angle']:.2f}, "
             f"cmd={cmd}, dist_mm={dist:.2f}, pose={pose}"
         )
+        i += 1
         time.sleep(0.1)
+except KeyboardInterrupt:
+    print("\nCtrl+C received, shutting down safely...")
 finally:
     dev.disconnect()
     print("disconnect: done")
