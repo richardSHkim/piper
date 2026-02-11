@@ -205,6 +205,10 @@ class PikaToPiperJointMapper:
         self._last_ik_fail_reason: str = ""
         self._last_target_xyz: tuple[float, float, float] = (0.0, 0.0, 0.0)
         self._last_joint_limit_margin_rad: float = 0.0
+        self._last_dp_tracker: tuple[float, float, float] = (0.0, 0.0, 0.0)
+        self._last_dp_robot: tuple[float, float, float] = (0.0, 0.0, 0.0)
+        self._last_drot_tracker: tuple[float, float, float] = (0.0, 0.0, 0.0)
+        self._last_drot_robot: tuple[float, float, float] = (0.0, 0.0, 0.0)
 
     def _read_observation_joints(self, obs: dict | None) -> np.ndarray:
         if not isinstance(obs, dict):
@@ -279,6 +283,14 @@ class PikaToPiperJointMapper:
         dp_tracker = np.clip(dp_tracker, -self.cfg.max_delta_pos_m, self.cfg.max_delta_pos_m)
         drot_tracker = np.clip(drot_tracker, -self.cfg.max_delta_rot_rad, self.cfg.max_delta_rot_rad)
         dp_robot, drot_robot = self._map_delta_to_robot_frame(dp_tracker, drot_tracker)
+        self._last_dp_tracker = (float(dp_tracker[0]), float(dp_tracker[1]), float(dp_tracker[2]))
+        self._last_dp_robot = (float(dp_robot[0]), float(dp_robot[1]), float(dp_robot[2]))
+        self._last_drot_tracker = (
+            float(drot_tracker[0]),
+            float(drot_tracker[1]),
+            float(drot_tracker[2]),
+        )
+        self._last_drot_robot = (float(drot_robot[0]), float(drot_robot[1]), float(drot_robot[2]))
 
         self._target_pose[:3, 3] += self.cfg.linear_scale * dp_robot
         self._target_pose[:3, 3] = np.clip(
@@ -351,6 +363,22 @@ class PikaToPiperJointMapper:
     @property
     def last_ik_fail_reason(self) -> str:
         return self._last_ik_fail_reason
+
+    @property
+    def last_dp_tracker(self) -> tuple[float, float, float]:
+        return self._last_dp_tracker
+
+    @property
+    def last_dp_robot(self) -> tuple[float, float, float]:
+        return self._last_dp_robot
+
+    @property
+    def last_drot_tracker(self) -> tuple[float, float, float]:
+        return self._last_drot_tracker
+
+    @property
+    def last_drot_robot(self) -> tuple[float, float, float]:
+        return self._last_drot_robot
 
 
 def _quat_angle_rad(q1: tuple[float, float, float, float], q2: tuple[float, float, float, float]) -> float:
@@ -445,6 +473,8 @@ class TeleoperatePikaPiperConfig:
     startup_max_pos_delta_m: float = 0.002
     startup_max_rot_delta_rad: float = 0.03
     startup_timeout_s: float = 15.0
+    debug_mapping: bool = False
+    debug_mapping_every_n: int = 20
 
 
 def teleop_loop(
@@ -457,6 +487,8 @@ def teleop_loop(
     display_data: bool = False,
     duration: float | None = None,
     display_compressed_images: bool = False,
+    debug_mapping: bool = False,
+    debug_mapping_every_n: int = 20,
 ):
     start = time.perf_counter()
     iter_idx = 0
@@ -495,6 +527,19 @@ def teleop_loop(
                 f"[loop] iter={iter_idx} loop_ms={loop_s * 1e3:.2f} hz={1 / loop_s:.1f} "
                 f"ik_ms={mapper.last_ik_time_ms:.2f} ik_ok=0 pose_valid={int(float(raw_action.get('pika.pose.valid', 0.0)) >= 0.5)} "
                 f"reason={mapper.last_ik_fail_reason}"
+            )
+
+        if debug_mapping and iter_idx % max(1, debug_mapping_every_n) == 0:
+            dpt = mapper.last_dp_tracker
+            dpr = mapper.last_dp_robot
+            drt = mapper.last_drot_tracker
+            drr = mapper.last_drot_robot
+            print(
+                "[map] "
+                f"dp_tracker=({dpt[0]:+.4f},{dpt[1]:+.4f},{dpt[2]:+.4f}) -> "
+                f"dp_robot=({dpr[0]:+.4f},{dpr[1]:+.4f},{dpr[2]:+.4f}), "
+                f"drot_tracker=({drt[0]:+.4f},{drt[1]:+.4f},{drt[2]:+.4f}) -> "
+                f"drot_robot=({drr[0]:+.4f},{drr[1]:+.4f},{drr[2]:+.4f})"
             )
 
         if duration is not None and time.perf_counter() - start >= duration:
@@ -561,6 +606,8 @@ def teleoperate(cfg: TeleoperatePikaPiperConfig):
             robot_action_processor=robot_action_processor,
             robot_observation_processor=robot_observation_processor,
             display_compressed_images=display_compressed_images,
+            debug_mapping=cfg.debug_mapping,
+            debug_mapping_every_n=cfg.debug_mapping_every_n,
         )
     except KeyboardInterrupt:
         pass
