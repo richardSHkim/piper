@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 
 import logging
+import math
 import time
 from dataclasses import asdict, dataclass
 from pprint import pformat
@@ -41,6 +42,88 @@ class TeleoperateEndPoseConfig:
     angular_scale: float = 1.0
     max_delta_pos_m: float = 0.03
     max_delta_rot_rad: float = 0.30
+    startup_wait_for_pose: bool = True
+    startup_stable_frames: int = 30
+    startup_max_pos_delta_m: float = 0.002
+    startup_max_rot_delta_rad: float = 0.03
+    startup_timeout_s: float = 15.0
+
+
+def _clamp(x: float, lo: float, hi: float) -> float:
+    return min(max(x, lo), hi)
+
+
+def _quat_angle_rad(q1: tuple[float, float, float, float], q2: tuple[float, float, float, float]) -> float:
+    n1 = math.sqrt(sum(v * v for v in q1))
+    n2 = math.sqrt(sum(v * v for v in q2))
+    if n1 < 1e-12 or n2 < 1e-12:
+        return 0.0
+    a1 = tuple(v / n1 for v in q1)
+    a2 = tuple(v / n2 for v in q2)
+    dot = abs(sum(x * y for x, y in zip(a1, a2, strict=True)))
+    dot = _clamp(dot, -1.0, 1.0)
+    return 2.0 * math.acos(dot)
+
+
+def wait_for_stable_pose(teleop: Teleoperator, fps: int, cfg: TeleoperateEndPoseConfig) -> None:
+    logging.info(
+        "Waiting for stable PIKA pose: valid=%d consecutive frames, max dp=%.4fm, max drot=%.4frad",
+        cfg.startup_stable_frames,
+        cfg.startup_max_pos_delta_m,
+        cfg.startup_max_rot_delta_rad,
+    )
+    stable = 0
+    prev_pos = None
+    prev_rot = None
+    started = time.perf_counter()
+
+    while stable < cfg.startup_stable_frames:
+        loop_start = time.perf_counter()
+        action = teleop.get_action()
+        pose_valid = float(action.get("pika.pose.valid", 0.0)) >= 0.5
+        if not pose_valid:
+            stable = 0
+            prev_pos = None
+            prev_rot = None
+        else:
+            pos = (
+                float(action["pika.pos.x"]),
+                float(action["pika.pos.y"]),
+                float(action["pika.pos.z"]),
+            )
+            rot = (
+                float(action["pika.rot.x"]),
+                float(action["pika.rot.y"]),
+                float(action["pika.rot.z"]),
+                float(action["pika.rot.w"]),
+            )
+            if prev_pos is None or prev_rot is None:
+                stable = 1
+            else:
+                dp = math.sqrt(sum((a - b) * (a - b) for a, b in zip(pos, prev_pos, strict=True)))
+                drot = _quat_angle_rad(rot, prev_rot)
+                if dp <= cfg.startup_max_pos_delta_m and drot <= cfg.startup_max_rot_delta_rad:
+                    stable += 1
+                else:
+                    stable = 1
+            prev_pos = pos
+            prev_rot = rot
+
+        if cfg.startup_timeout_s > 0 and (time.perf_counter() - started) >= cfg.startup_timeout_s:
+            raise TimeoutError(
+                "PIKA pose did not stabilize before timeout. "
+                "Check base station tracking/visibility and tracker selection."
+            )
+
+        dt = time.perf_counter() - loop_start
+        precise_sleep(max(1 / fps - dt, 0.0))
+        print(
+            f"Stabilizing pose... {stable}/{cfg.startup_stable_frames} valid frames",
+            end="\r",
+            flush=True,
+        )
+    print()
+    logging.info("PIKA pose stabilized. Starting teleoperation.")
 
 
 def make_pika_endpose_teleop_action_processor(
@@ -128,6 +211,8 @@ def teleoperate_endpose(cfg: TeleoperateEndPoseConfig):
     robot.connect()
 
     try:
+        if cfg.startup_wait_for_pose:
+            wait_for_stable_pose(teleop=teleop, fps=cfg.fps, cfg=cfg)
         teleop_loop(
             teleop=teleop,
             robot=robot,
