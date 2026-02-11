@@ -155,6 +155,9 @@ class RGBFrameVisualizer:
         self.pygame.draw.line(self.screen, (255, 0, 0), p0, px, 3)
         self.pygame.draw.line(self.screen, (0, 255, 0), p0, py, 3)
         self.pygame.draw.line(self.screen, (0, 0, 255), p0, pz, 3)
+        self.screen.blit(self.font.render("X", True, (180, 20, 20)), (px[0] + 2, px[1] + 2))
+        self.screen.blit(self.font.render("Y", True, (20, 130, 20)), (py[0] + 2, py[1] + 2))
+        self.screen.blit(self.font.render("Z", True, (20, 20, 180)), (pz[0] + 2, pz[1] + 2))
         self.pygame.draw.circle(self.screen, origin_color, p0, 5)
         self.screen.blit(self.font.render(name, True, origin_color), (p0[0] + 8, p0[1] - 8))
 
@@ -191,6 +194,19 @@ class RGBFrameVisualizer:
             x1 = self._project((g * 0.1, 0.6, 0.0))
             self.pygame.draw.line(self.screen, (206, 214, 228), y0, y1, 1)
             self.pygame.draw.line(self.screen, (206, 214, 228), x0, x1, 1)
+        # Depth cue: z-level rectangles (farther = lighter/smaller by projection)
+        for z, c in ((0.10, (188, 198, 216)), (0.25, (170, 182, 202)), (0.40, (154, 168, 190))):
+            corners = [(-0.45, -0.45, z), (0.45, -0.45, z), (0.45, 0.45, z), (-0.45, 0.45, z)]
+            p = [self._project(v) for v in corners]
+            self.pygame.draw.lines(self.screen, c, True, p, 1)
+        # Base Z ruler for clearer vertical depth orientation.
+        bz0 = self._project((0.0, 0.0, 0.0))
+        bz1 = self._project((0.0, 0.0, 0.5))
+        self.pygame.draw.line(self.screen, (60, 90, 180), bz0, bz1, 2)
+        for z in (0.1, 0.2, 0.3, 0.4, 0.5):
+            tick = self._project((0.0, 0.0, z))
+            self.pygame.draw.line(self.screen, (60, 90, 180), (tick[0] - 4, tick[1]), (tick[0] + 4, tick[1]), 1)
+            self.screen.blit(self.font.render(f"{z:.1f}", True, (60, 90, 180)), (tick[0] + 6, tick[1] - 8))
         self._draw_frame((0.0, 0.0, 0.0), (0.0, 0.0, 0.0, 1.0), 0.12, "base", (120, 120, 220))
         self._draw_frame(target_pos, target_quat, target_axis_len_m, "cmd(target)", (255, 240, 120))
         info = self.font.render("W/S or Up/Down: zoom, close window: exit", True, (40, 46, 58))
