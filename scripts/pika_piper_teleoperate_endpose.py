@@ -175,15 +175,30 @@ class RGBFrameVisualizer:
                 if event.key in (self.pygame.K_s, self.pygame.K_DOWN):
                     self.scale_factor = max(100.0, self.scale_factor - self.zoom_step)
 
-        self.screen.fill((8, 8, 8))
+        # Bright background + ground grid for better depth perception.
+        self.screen.fill((235, 240, 248))
+        self.pygame.draw.rect(self.screen, (220, 228, 240), (0, 0, self.width, self.height // 2))
+        self.pygame.draw.rect(
+            self.screen, (242, 246, 252), (0, self.height // 2, self.width, self.height - self.height // 2)
+        )
+        center = self._project((0.0, 0.0, 0.0))
+        self.pygame.draw.line(self.screen, (180, 188, 202), (0, center[1]), (self.width, center[1]), 1)
+        self.pygame.draw.line(self.screen, (180, 188, 202), (center[0], 0), (center[0], self.height), 1)
+        for g in range(-6, 7):
+            y0 = self._project((-0.6, g * 0.1, 0.0))
+            y1 = self._project((0.6, g * 0.1, 0.0))
+            x0 = self._project((g * 0.1, -0.6, 0.0))
+            x1 = self._project((g * 0.1, 0.6, 0.0))
+            self.pygame.draw.line(self.screen, (206, 214, 228), y0, y1, 1)
+            self.pygame.draw.line(self.screen, (206, 214, 228), x0, x1, 1)
         self._draw_frame((0.0, 0.0, 0.0), (0.0, 0.0, 0.0, 1.0), 0.12, "base", (120, 120, 220))
         self._draw_frame(target_pos, target_quat, target_axis_len_m, "cmd(target)", (255, 240, 120))
-        info = self.font.render("W/S or Up/Down: zoom, close window: exit", True, (220, 220, 220))
+        info = self.font.render("W/S or Up/Down: zoom, close window: exit", True, (40, 46, 58))
         self.screen.blit(info, (10, 10))
         cmd_text = self.font.render(
             f"EndPoseCtrl int: X={cmd_ints[0]} Y={cmd_ints[1]} Z={cmd_ints[2]} RX={cmd_ints[3]} RY={cmd_ints[4]} RZ={cmd_ints[5]}",
             True,
-            (255, 220, 160),
+            (70, 52, 22),
         )
         self.screen.blit(cmd_text, (10, 38))
         self.pygame.display.flip()
