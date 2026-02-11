@@ -36,6 +36,22 @@ def _make_zero_action(gripper: float = 1.0) -> dict[str, float]:
     return act
 
 
+def _format_pika_pose(raw_action: dict) -> str:
+    return (
+        f"pos=({raw_action.get('pika.pos.x', 0.0):.4f}, {raw_action.get('pika.pos.y', 0.0):.4f}, "
+        f"{raw_action.get('pika.pos.z', 0.0):.4f}), "
+        f"quat=({raw_action.get('pika.rot.x', 0.0):.4f}, {raw_action.get('pika.rot.y', 0.0):.4f}, "
+        f"{raw_action.get('pika.rot.z', 0.0):.4f}, {raw_action.get('pika.rot.w', 1.0):.4f}), "
+        f"gripper={raw_action.get('pika.gripper.pos', 0.0):.3f}, "
+        f"pose_valid={raw_action.get('pika.pose.valid', 0.0):.0f}"
+    )
+
+
+def _format_joint_action(robot_action: dict) -> str:
+    joints = ", ".join([f"j{i}={robot_action.get(f'joint_{i}.pos', 0.0):.4f}" for i in range(1, 7)])
+    return f"{joints}, gripper={robot_action.get('gripper.pos', 0.0):.3f}"
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="PIKA Sense -> PiPER follower teleoperation loop")
     parser.add_argument("--teleop-port", default="/dev/ttyUSB0", help="PIKA Sense serial port")
@@ -164,7 +180,10 @@ def main() -> None:
             raw_action = teleop.get_action()
             robot_action = teleop_action_processor((raw_action, obs))
             if args.dry_run:
-                print(f"[dry-run] action={robot_action}")
+                print(
+                    f"[dry-run] pika_pose: {_format_pika_pose(raw_action)} | "
+                    f"mapped_action: {_format_joint_action(robot_action)}"
+                )
             else:
                 robot.send_action(robot_action)
 
