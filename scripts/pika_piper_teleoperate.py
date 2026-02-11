@@ -1,292 +1,519 @@
 #!/usr/bin/env python3
 
-import argparse
+import logging
 import time
-from collections import deque
-import math
+from dataclasses import asdict, dataclass
+from pprint import pformat
 
-from lerobot.processor import RobotProcessorPipeline
-from lerobot.processor.converters import robot_action_observation_to_transition, transition_to_robot_action
-from lerobot_teleoperator_pika import MapPikaActionToPiperJoints, PikaTeleoperator, PikaTeleoperatorConfig
-from lerobot_robot_piper_follower import PiperFollower, PiperFollowerConfig
+import numpy as np
+import rerun as rr
 
-
-def make_teleop_action_processor(args: argparse.Namespace) -> tuple[RobotProcessorPipeline, MapPikaActionToPiperJoints]:
-    step = MapPikaActionToPiperJoints(
-        linear_scale=args.linear_scale,
-        angular_scale=args.angular_scale,
-        max_delta_pos_m=args.max_delta_pos_m,
-        max_delta_rot_rad=args.max_delta_rot_rad,
-        damping=args.ik_damping,
-        max_iterations=args.ik_max_iterations,
-        max_delta_q=args.ik_max_delta_q,
-        pos_tol=args.ik_pos_tol,
-        rot_tol=args.ik_rot_tol,
-        solve_ik=(args.command_mode == "joint"),
-    )
-    pipeline = RobotProcessorPipeline(
-        steps=[step],
-        to_transition=robot_action_observation_to_transition,
-        to_output=transition_to_robot_action,
-    )
-    return pipeline, step
+from lerobot.cameras.opencv.configuration_opencv import OpenCVCameraConfig  # noqa: F401
+from lerobot.cameras.realsense.configuration_realsense import RealSenseCameraConfig  # noqa: F401
+from lerobot.configs import parser
+from lerobot.processor import (
+    RobotAction,
+    RobotObservation,
+    RobotProcessorPipeline,
+    make_default_processors,
+)
+from lerobot.robots import Robot, RobotConfig, make_robot_from_config
+from lerobot.teleoperators import Teleoperator, TeleoperatorConfig, make_teleoperator_from_config
+from lerobot.utils.import_utils import register_third_party_plugins
+from lerobot.utils.robot_utils import precise_sleep
+from lerobot.utils.utils import init_logging, move_cursor_up
+from lerobot.utils.visualization_utils import init_rerun, log_rerun_data
 
 
-def _make_zero_action(gripper: float = 1.0) -> dict[str, float]:
-    act = {f"joint_{i}.pos": 0.0 for i in range(1, 7)}
-    act["gripper.pos"] = max(0.0, min(1.0, gripper))
-    return act
+def _clamp(x: float, lo: float, hi: float) -> float:
+    return min(max(x, lo), hi)
 
 
-def _format_pika_pose(raw_action: dict) -> str:
-    return (
-        f"pos=({raw_action.get('pika.pos.x', 0.0):.4f}, {raw_action.get('pika.pos.y', 0.0):.4f}, "
-        f"{raw_action.get('pika.pos.z', 0.0):.4f}), "
-        f"quat=({raw_action.get('pika.rot.x', 0.0):.4f}, {raw_action.get('pika.rot.y', 0.0):.4f}, "
-        f"{raw_action.get('pika.rot.z', 0.0):.4f}, {raw_action.get('pika.rot.w', 1.0):.4f}), "
-        f"gripper={raw_action.get('pika.gripper.pos', 0.0):.3f}, "
-        f"pose_valid={raw_action.get('pika.pose.valid', 0.0):.0f}"
+def _normalize_angle(a: float) -> float:
+    return (a + np.pi) % (2.0 * np.pi) - np.pi
+
+
+def _skew(v: np.ndarray) -> np.ndarray:
+    return np.array(
+        [[0.0, -v[2], v[1]], [v[2], 0.0, -v[0]], [-v[1], v[0], 0.0]],
+        dtype=np.float64,
     )
 
 
-def _format_joint_action(robot_action: dict) -> str:
-    joints = ", ".join([f"j{i}={robot_action.get(f'joint_{i}.pos', 0.0):.4f}" for i in range(1, 7)])
-    return f"{joints}, gripper={robot_action.get('gripper.pos', 0.0):.3f}"
+def _rotvec_to_matrix(rotvec: np.ndarray) -> np.ndarray:
+    theta = np.linalg.norm(rotvec)
+    if theta < 1e-12:
+        return np.eye(3, dtype=np.float64)
+    axis = rotvec / theta
+    k = _skew(axis)
+    return np.eye(3, dtype=np.float64) + np.sin(theta) * k + (1.0 - np.cos(theta)) * (k @ k)
 
 
-def _rotation_matrix_to_rpy(rot) -> tuple[float, float, float]:
-    # XYZ roll-pitch-yaw
-    sy = -rot[2, 0]
-    sy = max(min(sy, 1.0), -1.0)
-    pitch = math.asin(sy)
-    cp = math.cos(pitch)
-
-    if abs(cp) > 1e-6:
-        roll = math.atan2(rot[2, 1], rot[2, 2])
-        yaw = math.atan2(rot[1, 0], rot[0, 0])
-    else:
-        # Gimbal lock fallback
-        roll = 0.0
-        yaw = math.atan2(-rot[0, 1], rot[1, 1])
-    return roll, pitch, yaw
-
-
-def main() -> None:
-    parser = argparse.ArgumentParser(description="PIKA Sense -> PiPER follower teleoperation loop")
-    parser.add_argument("--teleop-port", default="/dev/ttyUSB0", help="PIKA Sense serial port")
-    parser.add_argument("--tracker-device", default=None, help="Optional tracker device name (e.g. WM0)")
-    parser.add_argument("--robot-can-name", default="can_follower", help="PiPER follower CAN interface")
-    parser.add_argument("--fps", type=int, default=50, help="Control loop rate")
-    parser.add_argument("--speed-ratio", type=int, default=60, help="PiPER speed ratio [0..100]")
-    parser.add_argument("--gripper-effort", type=int, default=1000, help="PiPER gripper effort [0..5000]")
-    parser.add_argument(
-        "--command-mode",
-        choices=["endpose", "joint"],
-        default="endpose",
-        help="Send EndPoseCtrl(cartesian) or JointCtrl(joint) to PiPER",
+def _matrix_to_rotvec(rot: np.ndarray) -> np.ndarray:
+    tr = np.trace(rot)
+    c = _clamp((tr - 1.0) * 0.5, -1.0, 1.0)
+    theta = np.arccos(c)
+    if theta < 1e-12:
+        return np.zeros(3, dtype=np.float64)
+    w = np.array(
+        [
+            rot[2, 1] - rot[1, 2],
+            rot[0, 2] - rot[2, 0],
+            rot[1, 0] - rot[0, 1],
+        ],
+        dtype=np.float64,
     )
-    parser.add_argument("--linear-scale", type=float, default=1.0, help="Scale for tracker translation delta")
-    parser.add_argument("--angular-scale", type=float, default=1.0, help="Scale for tracker rotation delta")
-    parser.add_argument("--max-delta-pos-m", type=float, default=0.03, help="Max translation delta per frame")
-    parser.add_argument("--max-delta-rot-rad", type=float, default=0.30, help="Max rotation delta per frame")
-    parser.add_argument("--ik-damping", type=float, default=0.08, help="IK damping factor")
-    parser.add_argument("--ik-max-iterations", type=int, default=50, help="IK max iterations")
-    parser.add_argument("--ik-max-delta-q", type=float, default=0.08, help="Per-joint max delta per frame")
-    parser.add_argument("--ik-pos-tol", type=float, default=2e-3, help="IK position tolerance")
-    parser.add_argument("--ik-rot-tol", type=float, default=2e-2, help="IK orientation tolerance")
-    parser.add_argument("--print-interval", type=float, default=1.0, help="Status log period (s)")
-    parser.add_argument(
-        "--dry-run",
-        action="store_true",
-        help="Do not send actions to PiPER; only print transformed action values",
-    )
-    parser.add_argument("--startup-move-zero", action="store_true", help="Move PiPER to zero pose before arming")
-    parser.add_argument("--startup-zero-settle-s", type=float, default=1.0, help="Wait time after zero move")
-    parser.add_argument(
-        "--startup-sync-gripper",
-        action="store_true",
-        help="When moving to zero, set PiPER gripper to current PIKA gripper ratio",
-    )
-    parser.add_argument(
-        "--arm-gesture-double-close",
-        action="store_true",
-        help="Require double-close gesture on PIKA gripper to start teleoperation",
-    )
-    parser.add_argument("--gesture-open-threshold", type=float, default=0.75, help="Open threshold for gesture")
-    parser.add_argument("--gesture-close-threshold", type=float, default=0.25, help="Close threshold for gesture")
-    parser.add_argument("--gesture-window-s", type=float, default=1.0, help="Double-close window in seconds")
-    parser.add_argument("--gesture-debounce-s", type=float, default=0.15, help="Debounce per close event")
-    parser.add_argument("--require-pose", action="store_true", help="Fail if tracker pose is missing")
-    args = parser.parse_args()
+    return (theta / (2.0 * np.sin(theta))) * w
 
-    teleop_cfg = PikaTeleoperatorConfig(
-        id="pika_teleop_01",
-        port=args.teleop_port,
-        tracker_device=args.tracker_device,
-        require_pose=args.require_pose,
-    )
-    robot_cfg = PiperFollowerConfig(
-        id="piper_follower_01",
-        can_name=args.robot_can_name,
-        speed_ratio=args.speed_ratio,
-        gripper_effort=args.gripper_effort,
+
+def _quat_to_matrix(qx: float, qy: float, qz: float, qw: float) -> np.ndarray:
+    q = np.array([qx, qy, qz, qw], dtype=np.float64)
+    n = np.linalg.norm(q)
+    if n < 1e-12:
+        return np.eye(3, dtype=np.float64)
+    q = q / n
+    x, y, z, w = q
+    return np.array(
+        [
+            [1 - 2 * (y * y + z * z), 2 * (x * y - z * w), 2 * (x * z + y * w)],
+            [2 * (x * y + z * w), 1 - 2 * (x * x + z * z), 2 * (y * z - x * w)],
+            [2 * (x * z - y * w), 2 * (y * z + x * w), 1 - 2 * (x * x + y * y)],
+        ],
+        dtype=np.float64,
     )
 
-    teleop = PikaTeleoperator(teleop_cfg)
-    robot = PiperFollower(robot_cfg)
-    teleop_action_processor, map_step = make_teleop_action_processor(args)
+
+class PiperNumericalIK:
+    def __init__(self):
+        self.dh = [
+            (0.0, 0.0, 0.123, 0.0),
+            (-np.pi / 2.0, 0.0, 0.0, -172.22 / 180.0 * np.pi),
+            (0.0, 0.28503, 0.0, -102.78 / 180.0 * np.pi),
+            (np.pi / 2.0, -0.021984, 0.25075, 0.0),
+            (-np.pi / 2.0, 0.0, 0.0, 0.0),
+            (np.pi / 2.0, 0.0, 0.211, 0.0),
+        ]
+        self.joint_limits = np.array(
+            [
+                [-2.618, 2.618],
+                [0.0, np.pi],
+                [-np.pi, 0.0],
+                [-2.967, 2.967],
+                [-1.2, 1.2],
+                [-1.22, 1.22],
+            ],
+            dtype=np.float64,
+        )
+
+    def _modified_dh(self, alpha: float, a: float, d: float, theta: float) -> np.ndarray:
+        ct, st = np.cos(theta), np.sin(theta)
+        ca, sa = np.cos(alpha), np.sin(alpha)
+        return np.array(
+            [
+                [ct, -st, 0.0, a],
+                [st * ca, ct * ca, -sa, -sa * d],
+                [st * sa, ct * sa, ca, ca * d],
+                [0.0, 0.0, 0.0, 1.0],
+            ],
+            dtype=np.float64,
+        )
+
+    def fk(self, joints: np.ndarray) -> np.ndarray:
+        t = np.eye(4, dtype=np.float64)
+        for i, (alpha, a, d, theta_off) in enumerate(self.dh):
+            t = t @ self._modified_dh(alpha, a, d, joints[i] + theta_off)
+        return t
+
+    def _pose_error(self, current: np.ndarray, target: np.ndarray) -> np.ndarray:
+        e = np.zeros(6, dtype=np.float64)
+        e[:3] = target[:3, 3] - current[:3, 3]
+        re = target[:3, :3] @ current[:3, :3].T
+        e[3:] = _matrix_to_rotvec(re)
+        return e
+
+    def _numerical_jacobian(self, joints: np.ndarray, delta: float = 1e-6) -> np.ndarray:
+        j = np.zeros((6, 6), dtype=np.float64)
+        t0 = self.fk(joints)
+        p0 = t0[:3, 3].copy()
+        r0 = t0[:3, :3].copy()
+        for i in range(6):
+            q = joints.copy()
+            q[i] += delta
+            ti = self.fk(q)
+            j[:3, i] = (ti[:3, 3] - p0) / delta
+            dr = ti[:3, :3] @ r0.T
+            j[3:, i] = _matrix_to_rotvec(dr) / delta
+        return j
+
+    def solve(
+        self,
+        initial_q: np.ndarray,
+        target_pose: np.ndarray,
+        max_iterations: int,
+        damping: float,
+        max_delta_q: float,
+        pos_tol: float,
+        rot_tol: float,
+    ) -> np.ndarray:
+        q = initial_q.copy().astype(np.float64)
+        for _ in range(max_iterations):
+            curr = self.fk(q)
+            e = self._pose_error(curr, target_pose)
+            if np.linalg.norm(e[:3]) < pos_tol and np.linalg.norm(e[3:]) < rot_tol:
+                return q
+
+            jac = self._numerical_jacobian(q)
+            jj_t = jac @ jac.T
+            jj_t += (damping * damping) * np.eye(6, dtype=np.float64)
+            dq = jac.T @ np.linalg.solve(jj_t, e)
+            dq = np.clip(dq, -max_delta_q, max_delta_q)
+            q = q + dq
+            for i in range(6):
+                q[i] = _normalize_angle(q[i])
+                q[i] = np.clip(q[i], self.joint_limits[i, 0], self.joint_limits[i, 1])
+        raise RuntimeError("IK did not converge")
+
+
+@dataclass
+class MapperConfig:
+    linear_scale: float = 1.0
+    angular_scale: float = 1.0
+    max_delta_pos_m: float = 0.03
+    max_delta_rot_rad: float = 0.30
+    damping: float = 0.08
+    max_iterations: int = 50
+    max_delta_q: float = 0.08
+    pos_tol: float = 2e-3
+    rot_tol: float = 2e-2
+    workspace_min_xyz: tuple[float, float, float] = (-0.45, -0.45, 0.02)
+    workspace_max_xyz: tuple[float, float, float] = (0.70, 0.45, 0.75)
+
+
+class PikaToPiperJointMapper:
+    def __init__(self, cfg: MapperConfig):
+        self.cfg = cfg
+        self.ik = PiperNumericalIK()
+        self._is_initialized = False
+        self._last_input_pos: np.ndarray | None = None
+        self._last_input_rot: np.ndarray | None = None
+        self._target_pose: np.ndarray | None = None
+        self._q: np.ndarray | None = None
+
+    def _read_observation_joints(self, obs: dict | None) -> np.ndarray:
+        if not isinstance(obs, dict):
+            return np.zeros(6, dtype=np.float64)
+        keys = [f"joint_{i}.pos" for i in range(1, 7)]
+        if not all(k in obs for k in keys):
+            return np.zeros(6, dtype=np.float64)
+        return np.array([float(obs[k]) for k in keys], dtype=np.float64)
+
+    def _parse_pose(self, action: RobotAction) -> tuple[np.ndarray, np.ndarray]:
+        pos = np.array(
+            [
+                float(action["pika.pos.x"]),
+                float(action["pika.pos.y"]),
+                float(action["pika.pos.z"]),
+            ],
+            dtype=np.float64,
+        )
+        rot = _quat_to_matrix(
+            float(action["pika.rot.x"]),
+            float(action["pika.rot.y"]),
+            float(action["pika.rot.z"]),
+            float(action["pika.rot.w"]),
+        )
+        return pos, rot
+
+    def _build_action(self, q: np.ndarray, gripper: float) -> RobotAction:
+        out: RobotAction = {f"joint_{i + 1}.pos": float(q[i]) for i in range(6)}
+        out["gripper.pos"] = _clamp(float(gripper), 0.0, 1.0)
+        return out
+
+    def _map_delta_to_robot_frame(self, dp_tracker: np.ndarray, drot_tracker: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+        dp = np.array([dp_tracker[0], -dp_tracker[1], dp_tracker[2]], dtype=np.float64)
+        drot = np.array([drot_tracker[0], -drot_tracker[1], drot_tracker[2]], dtype=np.float64)
+        return dp, drot
+
+    def rebase_reference(self, raw_action: RobotAction, observation: dict | None = None) -> None:
+        pos, rot = self._parse_pose(raw_action)
+        self._q = self._read_observation_joints(observation)
+        self._target_pose = self.ik.fk(self._q)
+        self._last_input_pos = pos
+        self._last_input_rot = rot
+        self._is_initialized = True
+
+    def map_action(self, raw_action: RobotAction, observation: dict | None) -> RobotAction:
+        pose_valid = float(raw_action.get("pika.pose.valid", 1.0)) >= 0.5
+        gripper = float(raw_action.get("pika.gripper.pos", 0.0))
+
+        if not self._is_initialized:
+            if pose_valid:
+                self.rebase_reference(raw_action, observation)
+            else:
+                self._q = self._read_observation_joints(observation)
+                self._target_pose = self.ik.fk(self._q)
+                self._is_initialized = True
+            assert self._q is not None
+            return self._build_action(self._q, gripper)
+
+        assert self._q is not None
+        assert self._target_pose is not None
+
+        if not pose_valid:
+            return self._build_action(self._q, gripper)
+
+        pos, rot = self._parse_pose(raw_action)
+        assert self._last_input_pos is not None
+        assert self._last_input_rot is not None
+
+        dp_tracker = pos - self._last_input_pos
+        drot_tracker = _matrix_to_rotvec(self._last_input_rot.T @ rot)
+
+        dp_tracker = np.clip(dp_tracker, -self.cfg.max_delta_pos_m, self.cfg.max_delta_pos_m)
+        drot_tracker = np.clip(drot_tracker, -self.cfg.max_delta_rot_rad, self.cfg.max_delta_rot_rad)
+        dp_robot, drot_robot = self._map_delta_to_robot_frame(dp_tracker, drot_tracker)
+
+        self._target_pose[:3, 3] += self.cfg.linear_scale * dp_robot
+        self._target_pose[:3, 3] = np.clip(
+            self._target_pose[:3, 3],
+            np.array(self.cfg.workspace_min_xyz, dtype=np.float64),
+            np.array(self.cfg.workspace_max_xyz, dtype=np.float64),
+        )
+        self._target_pose[:3, :3] = self._target_pose[:3, :3] @ _rotvec_to_matrix(
+            self.cfg.angular_scale * drot_robot
+        )
+
+        try:
+            self._q = self.ik.solve(
+                initial_q=self._q,
+                target_pose=self._target_pose,
+                max_iterations=self.cfg.max_iterations,
+                damping=self.cfg.damping,
+                max_delta_q=self.cfg.max_delta_q,
+                pos_tol=self.cfg.pos_tol,
+                rot_tol=self.cfg.rot_tol,
+            )
+        except RuntimeError:
+            pass
+
+        self._last_input_pos = pos
+        self._last_input_rot = rot
+        return self._build_action(self._q, gripper)
+
+
+def _quat_angle_rad(q1: tuple[float, float, float, float], q2: tuple[float, float, float, float]) -> float:
+    n1 = np.linalg.norm(np.array(q1, dtype=np.float64))
+    n2 = np.linalg.norm(np.array(q2, dtype=np.float64))
+    if n1 < 1e-12 or n2 < 1e-12:
+        return 0.0
+    a1 = np.array(q1, dtype=np.float64) / n1
+    a2 = np.array(q2, dtype=np.float64) / n2
+    dot = abs(float(np.clip(np.dot(a1, a2), -1.0, 1.0)))
+    return 2.0 * float(np.arccos(dot))
+
+
+def wait_for_stable_pose(
+    teleop: Teleoperator,
+    fps: int,
+    stable_frames: int,
+    max_pos_delta_m: float,
+    max_rot_delta_rad: float,
+    timeout_s: float,
+) -> RobotAction:
+    stable = 0
+    prev_pos = None
+    prev_rot = None
+    started = time.perf_counter()
+    latest: RobotAction | None = None
+
+    while stable < stable_frames:
+        t0 = time.perf_counter()
+        action = teleop.get_action()
+        latest = action
+        pose_valid = float(action.get("pika.pose.valid", 0.0)) >= 0.5
+
+        if not pose_valid:
+            stable = 0
+            prev_pos = None
+            prev_rot = None
+        else:
+            pos = (
+                float(action["pika.pos.x"]),
+                float(action["pika.pos.y"]),
+                float(action["pika.pos.z"]),
+            )
+            rot = (
+                float(action["pika.rot.x"]),
+                float(action["pika.rot.y"]),
+                float(action["pika.rot.z"]),
+                float(action["pika.rot.w"]),
+            )
+            if prev_pos is None or prev_rot is None:
+                stable = 1
+            else:
+                dp = float(np.linalg.norm(np.array(pos) - np.array(prev_pos)))
+                drot = _quat_angle_rad(rot, prev_rot)
+                stable = stable + 1 if (dp <= max_pos_delta_m and drot <= max_rot_delta_rad) else 1
+            prev_pos = pos
+            prev_rot = rot
+
+        if timeout_s > 0 and (time.perf_counter() - started) >= timeout_s:
+            raise TimeoutError("PIKA pose did not stabilize before timeout")
+
+        dt = time.perf_counter() - t0
+        precise_sleep(max(1 / fps - dt, 0.0))
+        print(f"Stabilizing pose... {stable}/{stable_frames} valid frames", end="\r", flush=True)
+
+    print()
+    assert latest is not None
+    return latest
+
+
+@dataclass
+class TeleoperatePikaPiperConfig:
+    teleop: TeleoperatorConfig
+    robot: RobotConfig
+    fps: int = 60
+    teleop_time_s: float | None = None
+    display_data: bool = False
+    display_ip: str | None = None
+    display_port: int | None = None
+    display_compressed_images: bool = False
+    linear_scale: float = 1.0
+    angular_scale: float = 1.0
+    max_delta_pos_m: float = 0.03
+    max_delta_rot_rad: float = 0.30
+    ik_damping: float = 0.08
+    ik_max_iterations: int = 50
+    ik_max_delta_q: float = 0.08
+    ik_pos_tol: float = 2e-3
+    ik_rot_tol: float = 2e-2
+    startup_wait_for_pose: bool = True
+    startup_stable_frames: int = 30
+    startup_max_pos_delta_m: float = 0.002
+    startup_max_rot_delta_rad: float = 0.03
+    startup_timeout_s: float = 15.0
+
+
+def teleop_loop(
+    teleop: Teleoperator,
+    robot: Robot,
+    fps: int,
+    mapper: PikaToPiperJointMapper,
+    robot_action_processor: RobotProcessorPipeline[tuple[RobotAction, RobotObservation], RobotAction],
+    robot_observation_processor: RobotProcessorPipeline[RobotObservation, RobotObservation],
+    display_data: bool = False,
+    duration: float | None = None,
+    display_compressed_images: bool = False,
+):
+    display_len = max(len(key) for key in robot.action_features)
+    start = time.perf_counter()
+
+    while True:
+        loop_start = time.perf_counter()
+        obs = robot.get_observation()
+        raw_action = teleop.get_action()
+        mapped_action = mapper.map_action(raw_action, obs)
+        robot_action_to_send = robot_action_processor((mapped_action, obs))
+        _ = robot.send_action(robot_action_to_send)
+
+        if display_data:
+            obs_transition = robot_observation_processor(obs)
+            log_rerun_data(
+                observation=obs_transition,
+                action=mapped_action,
+                compress_images=display_compressed_images,
+            )
+
+            print("\n" + "-" * (display_len + 10))
+            print(f"{'NAME':<{display_len}} | {'NORM':>7}")
+            for motor, value in robot_action_to_send.items():
+                print(f"{motor:<{display_len}} | {value:>7.2f}")
+            move_cursor_up(len(robot_action_to_send) + 3)
+
+        dt_s = time.perf_counter() - loop_start
+        precise_sleep(max(1 / fps - dt_s, 0.0))
+        loop_s = time.perf_counter() - loop_start
+        print(f"Teleop loop time: {loop_s * 1e3:.2f}ms ({1 / loop_s:.0f} Hz)")
+        move_cursor_up(1)
+
+        if duration is not None and time.perf_counter() - start >= duration:
+            return
+
+
+@parser.wrap()
+def teleoperate(cfg: TeleoperatePikaPiperConfig):
+    init_logging()
+    logging.info(pformat(asdict(cfg)))
+
+    if cfg.display_data:
+        init_rerun(session_name="teleoperation", ip=cfg.display_ip, port=cfg.display_port)
+    display_compressed_images = (
+        True
+        if (cfg.display_data and cfg.display_ip is not None and cfg.display_port is not None)
+        else cfg.display_compressed_images
+    )
+
+    teleop = make_teleoperator_from_config(cfg.teleop)
+    robot = make_robot_from_config(cfg.robot)
+    _, robot_action_processor, robot_observation_processor = make_default_processors()
+
+    mapper = PikaToPiperJointMapper(
+        MapperConfig(
+            linear_scale=cfg.linear_scale,
+            angular_scale=cfg.angular_scale,
+            max_delta_pos_m=cfg.max_delta_pos_m,
+            max_delta_rot_rad=cfg.max_delta_rot_rad,
+            damping=cfg.ik_damping,
+            max_iterations=cfg.ik_max_iterations,
+            max_delta_q=cfg.ik_max_delta_q,
+            pos_tol=cfg.ik_pos_tol,
+            rot_tol=cfg.ik_rot_tol,
+        )
+    )
 
     teleop.connect()
     robot.connect()
-    print(
-        f"[start] teleop_port={args.teleop_port}, tracker={args.tracker_device}, "
-        f"robot_can={args.robot_can_name}, fps={args.fps}"
-    )
-
-    # Warmup read for gripper and pose validity.
-    startup_action = teleop.get_action()
-
-    if args.startup_move_zero:
-        zero_gripper = float(startup_action.get("pika.gripper.pos", 1.0)) if args.startup_sync_gripper else 1.0
-        zero_action = _make_zero_action(zero_gripper)
-        if args.dry_run:
-            print(f"[dry-run] startup zero action={zero_action}")
-        else:
-            robot.send_action(zero_action)
-        print(
-            f"[startup] moved to zero pose (gripper={zero_gripper:.3f}), "
-            f"settling {args.startup_zero_settle_s:.1f}s"
-        )
-        time.sleep(max(args.startup_zero_settle_s, 0.0))
-
-    if args.arm_gesture_double_close:
-        print(
-            "[startup] align PIKA with PiPER, then close gripper quickly twice to arm teleoperation"
-        )
-        close_times: deque[float] = deque()
-        prev_gripper = float(startup_action.get("pika.gripper.pos", 1.0))
-        last_close_time = -1e9
-        while True:
-            raw = teleop.get_action()
-            g = float(raw.get("pika.gripper.pos", 1.0))
-            now = time.perf_counter()
-
-            crossed_close = prev_gripper > args.gesture_open_threshold and g < args.gesture_close_threshold
-            if crossed_close and (now - last_close_time) > args.gesture_debounce_s:
-                close_times.append(now)
-                last_close_time = now
-                print(f"[startup] close event {len(close_times)}")
-
-            while close_times and (now - close_times[0]) > args.gesture_window_s:
-                close_times.popleft()
-
-            if len(close_times) >= 2:
-                obs = robot.get_observation()
-                map_step.rebase_reference(raw, obs)
-                print("[startup] teleoperation armed; reference pose captured")
-                break
-
-            prev_gripper = g
-            time.sleep(0.01)
-    else:
-        # Capture current absolute PIKA pose as reference now.
-        obs = robot.get_observation()
-        map_step.rebase_reference(startup_action, obs)
-        print("[startup] teleoperation armed immediately; reference pose captured")
-
-    last_log = time.perf_counter()
-    loop_count = 0
-    period = 1.0 / max(args.fps, 1)
 
     try:
-        while True:
-            loop_start = time.perf_counter()
-            obs = robot.get_observation()
-            raw_action = teleop.get_action()
-            robot_action = teleop_action_processor((raw_action, obs))
-            if args.dry_run:
-                tgt = map_step.get_target_pose()
-                if tgt is not None:
-                    roll, pitch, yaw = _rotation_matrix_to_rpy(tgt[:3, :3])
-                    target_str = (
-                        f"target_xyz_m=({tgt[0,3]:.4f}, {tgt[1,3]:.4f}, {tgt[2,3]:.4f}), "
-                        f"target_rpy_rad=({roll:.4f}, {pitch:.4f}, {yaw:.4f})"
-                    )
-                else:
-                    target_str = "target_pose=none"
-                print(
-                    f"[dry-run] pika_pose: {_format_pika_pose(raw_action)} | "
-                    f"{target_str} | mapped_action: {_format_joint_action(robot_action)}"
-                )
-            else:
-                if args.command_mode == "joint":
-                    robot.send_action(robot_action)
-                else:
-                    tgt = map_step.get_target_pose()
-                    if tgt is not None:
-                        roll, pitch, yaw = _rotation_matrix_to_rpy(tgt[:3, :3])
-                        x = int(round(float(tgt[0, 3]) * 1_000_000.0))  # m -> 0.001mm
-                        y = int(round(float(tgt[1, 3]) * 1_000_000.0))
-                        z = int(round(float(tgt[2, 3]) * 1_000_000.0))
-                        rx = int(round(math.degrees(roll) * 1000.0))     # rad -> 0.001deg
-                        ry = int(round(math.degrees(pitch) * 1000.0))
-                        rz = int(round(math.degrees(yaw) * 1000.0))
-                        robot._arm.MotionCtrl_2(0x01, 0x00, int(args.speed_ratio), 0x00)
-                        robot._arm.EndPoseCtrl(x, y, z, rx, ry, rz)
-                        if "gripper.pos" in robot_action:
-                            stroke_001mm = int(
-                                round(
-                                    float(robot_action["gripper.pos"])
-                                    * float(robot.config.gripper_opening_m)
-                                    * 1_000_000.0
-                                )
-                            )
-                            robot._arm.GripperCtrl(
-                                abs(stroke_001mm),
-                                int(args.gripper_effort),
-                                0x01,
-                                0x00,
-                            )
+        if cfg.startup_wait_for_pose:
+            startup_action = wait_for_stable_pose(
+                teleop=teleop,
+                fps=cfg.fps,
+                stable_frames=cfg.startup_stable_frames,
+                max_pos_delta_m=cfg.startup_max_pos_delta_m,
+                max_rot_delta_rad=cfg.startup_max_rot_delta_rad,
+                timeout_s=cfg.startup_timeout_s,
+            )
+        else:
+            startup_action = teleop.get_action()
 
-            loop_count += 1
-            now = time.perf_counter()
-            if now - last_log >= args.print_interval:
-                elapsed = now - last_log
-                if args.command_mode == "endpose":
-                    tgt = map_step.get_target_pose()
-                    if tgt is not None:
-                        roll, pitch, yaw = _rotation_matrix_to_rpy(tgt[:3, :3])
-                        target_str = (
-                            f"target_xyz=({tgt[0,3]:.3f},{tgt[1,3]:.3f},{tgt[2,3]:.3f})m "
-                            f"target_rpy=({roll:.3f},{pitch:.3f},{yaw:.3f})rad"
-                        )
-                    else:
-                        target_str = "target_pose=none"
-                    print(
-                        f"[run] loop_hz={loop_count / max(elapsed, 1e-6):.1f}, "
-                        f"mode=endpose, {target_str}, "
-                        f"obs_j1={obs.get('joint_1.pos', 0.0):.3f}, "
-                        f"gripper={robot_action.get('gripper.pos', 0.0):.3f}, "
-                        f"pose_valid={raw_action.get('pika.pose.valid', 0.0):.0f}"
-                    )
-                else:
-                    print(
-                        f"[run] loop_hz={loop_count / max(elapsed, 1e-6):.1f}, "
-                        f"j1={robot_action.get('joint_1.pos', 0.0):.3f}, "
-                        f"gripper={robot_action.get('gripper.pos', 0.0):.3f}, "
-                        f"pose_valid={raw_action.get('pika.pose.valid', 0.0):.0f}"
-                    )
-                last_log = now
-                loop_count = 0
+        startup_obs = robot.get_observation()
+        mapper.rebase_reference(startup_action, startup_obs)
 
-            dt = time.perf_counter() - loop_start
-            if dt < period:
-                time.sleep(period - dt)
+        teleop_loop(
+            teleop=teleop,
+            robot=robot,
+            fps=cfg.fps,
+            mapper=mapper,
+            display_data=cfg.display_data,
+            duration=cfg.teleop_time_s,
+            robot_action_processor=robot_action_processor,
+            robot_observation_processor=robot_observation_processor,
+            display_compressed_images=display_compressed_images,
+        )
     except KeyboardInterrupt:
-        print("\n[stop] keyboard interrupt")
+        pass
     finally:
+        if cfg.display_data:
+            rr.rerun_shutdown()
         teleop.disconnect()
         robot.disconnect()
+
+
+def main():
+    register_third_party_plugins()
+    teleoperate()
 
 
 if __name__ == "__main__":
