@@ -16,6 +16,12 @@ python scripts/pika_piper_teleoperate.py \
   --ik_damping=0.12 \
   --ik_max_delta_q=0.12 \
   --ik_pos_tol=0.005 \
+  --pos_axis_map=0,1,2 \
+  --pos_axis_sign=1,-1,1 \
+  --rot_axis_map=0,1,2 \
+  --rot_axis_sign=1,-1,1 \
+  --debug_mapping=true \
+  --debug_mapping_every_n=10 \
   --startup_wait_for_pose=true \
   --startup_stable_frames=30 \
   --startup_max_pos_delta_m=0.002 \

@@ -187,6 +187,10 @@ class MapperConfig:
     rot_tol: float = 2e-2
     workspace_min_xyz: tuple[float, float, float] = (-0.45, -0.45, 0.02)
     workspace_max_xyz: tuple[float, float, float] = (0.70, 0.45, 0.75)
+    pos_axis_map: tuple[int, int, int] = (0, 1, 2)
+    pos_axis_sign: tuple[float, float, float] = (1.0, -1.0, 1.0)
+    rot_axis_map: tuple[int, int, int] = (0, 1, 2)
+    rot_axis_sign: tuple[float, float, float] = (1.0, -1.0, 1.0)
 
 
 class PikaToPiperJointMapper:
@@ -241,8 +245,22 @@ class PikaToPiperJointMapper:
         return out
 
     def _map_delta_to_robot_frame(self, dp_tracker: np.ndarray, drot_tracker: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
-        dp = np.array([dp_tracker[0], -dp_tracker[1], dp_tracker[2]], dtype=np.float64)
-        drot = np.array([drot_tracker[0], -drot_tracker[1], drot_tracker[2]], dtype=np.float64)
+        dp = np.array(
+            [
+                self.cfg.pos_axis_sign[0] * dp_tracker[self.cfg.pos_axis_map[0]],
+                self.cfg.pos_axis_sign[1] * dp_tracker[self.cfg.pos_axis_map[1]],
+                self.cfg.pos_axis_sign[2] * dp_tracker[self.cfg.pos_axis_map[2]],
+            ],
+            dtype=np.float64,
+        )
+        drot = np.array(
+            [
+                self.cfg.rot_axis_sign[0] * drot_tracker[self.cfg.rot_axis_map[0]],
+                self.cfg.rot_axis_sign[1] * drot_tracker[self.cfg.rot_axis_map[1]],
+                self.cfg.rot_axis_sign[2] * drot_tracker[self.cfg.rot_axis_map[2]],
+            ],
+            dtype=np.float64,
+        )
         return dp, drot
 
     def rebase_reference(self, raw_action: RobotAction, observation: dict | None = None) -> None:
@@ -475,6 +493,26 @@ class TeleoperatePikaPiperConfig:
     startup_timeout_s: float = 15.0
     debug_mapping: bool = False
     debug_mapping_every_n: int = 20
+    # Mapping strings: comma-separated tracker axis indices (0:x,1:y,2:z)
+    # and signs (+1/-1) applied to mapped axes.
+    pos_axis_map: str = "0,1,2"
+    pos_axis_sign: str = "1,-1,1"
+    rot_axis_map: str = "0,1,2"
+    rot_axis_sign: str = "1,-1,1"
+
+
+def _parse_axis_map(text: str) -> tuple[int, int, int]:
+    vals = [int(x.strip()) for x in text.split(",")]
+    if len(vals) != 3 or sorted(vals) != [0, 1, 2]:
+        raise ValueError(f"Invalid axis map '{text}'. Use a permutation of 0,1,2 (e.g. 0,2,1).")
+    return vals[0], vals[1], vals[2]
+
+
+def _parse_axis_sign(text: str) -> tuple[float, float, float]:
+    vals = [float(x.strip()) for x in text.split(",")]
+    if len(vals) != 3 or any(v not in (-1.0, 1.0) for v in vals):
+        raise ValueError(f"Invalid axis sign '{text}'. Use three values from -1 or 1 (e.g. 1,-1,1).")
+    return vals[0], vals[1], vals[2]
 
 
 def teleop_loop(
@@ -563,6 +601,18 @@ def teleoperate(cfg: TeleoperatePikaPiperConfig):
     robot = make_robot_from_config(cfg.robot)
     _, robot_action_processor, robot_observation_processor = make_default_processors()
 
+    pos_axis_map = _parse_axis_map(cfg.pos_axis_map)
+    pos_axis_sign = _parse_axis_sign(cfg.pos_axis_sign)
+    rot_axis_map = _parse_axis_map(cfg.rot_axis_map)
+    rot_axis_sign = _parse_axis_sign(cfg.rot_axis_sign)
+    logging.info(
+        "Axis mapping: pos_map=%s pos_sign=%s rot_map=%s rot_sign=%s",
+        pos_axis_map,
+        pos_axis_sign,
+        rot_axis_map,
+        rot_axis_sign,
+    )
+
     mapper = PikaToPiperJointMapper(
         MapperConfig(
             linear_scale=cfg.linear_scale,
@@ -574,6 +624,10 @@ def teleoperate(cfg: TeleoperatePikaPiperConfig):
             max_delta_q=cfg.ik_max_delta_q,
             pos_tol=cfg.ik_pos_tol,
             rot_tol=cfg.ik_rot_tol,
+            pos_axis_map=pos_axis_map,
+            pos_axis_sign=pos_axis_sign,
+            rot_axis_map=rot_axis_map,
+            rot_axis_sign=rot_axis_sign,
         )
     )
 
