@@ -58,6 +58,8 @@ class TeleoperateEndPoseConfig:
     visualize_width: int = 1000
     visualize_height: int = 720
     visualize_target_axis_len_m: float = 0.10
+    visualize_raw_pika: bool = False
+    visualize_raw_axis_len_m: float = 0.10
 
 
 def _clamp(x: float, lo: float, hi: float) -> float:
@@ -167,6 +169,9 @@ class RGBFrameVisualizer:
         target_quat: tuple[float, float, float, float],
         target_axis_len_m: float,
         cmd_ints: tuple[int, int, int, int, int, int],
+        raw_pika_pos: tuple[float, float, float] | None = None,
+        raw_pika_quat: tuple[float, float, float, float] | None = None,
+        raw_axis_len_m: float = 0.10,
     ) -> bool:
         for event in self.pygame.event.get():
             if event.type == self.pygame.QUIT:
@@ -209,6 +214,8 @@ class RGBFrameVisualizer:
             self.screen.blit(self.font.render(f"{z:.1f}", True, (60, 90, 180)), (tick[0] + 6, tick[1] - 8))
         self._draw_frame((0.0, 0.0, 0.0), (0.0, 0.0, 0.0, 1.0), 0.12, "base", (120, 120, 220))
         self._draw_frame(target_pos, target_quat, target_axis_len_m, "cmd(target)", (255, 240, 120))
+        if raw_pika_pos is not None and raw_pika_quat is not None:
+            self._draw_frame(raw_pika_pos, raw_pika_quat, raw_axis_len_m, "pika(raw)", (220, 120, 255))
         info = self.font.render("W/S or Up/Down: zoom, close window: exit", True, (40, 46, 58))
         self.screen.blit(info, (10, 10))
         cmd_text = self.font.render(
@@ -339,6 +346,8 @@ def teleop_loop(
     dry_run_visualize: bool = False,
     visualizer: RGBFrameVisualizer | None = None,
     visualize_target_axis_len_m: float = 0.10,
+    visualize_raw_pika: bool = False,
+    visualize_raw_axis_len_m: float = 0.10,
 ):
     display_len = max(len(key) for key in robot.action_features)
     start = time.perf_counter()
@@ -371,6 +380,22 @@ def teleop_loop(
                 target_quat=target_quat,
                 target_axis_len_m=visualize_target_axis_len_m,
                 cmd_ints=cmd_ints,
+                raw_pika_pos=(
+                    float(raw_action.get("pika.pos.x", 0.0)),
+                    float(raw_action.get("pika.pos.y", 0.0)),
+                    float(raw_action.get("pika.pos.z", 0.0)),
+                )
+                if visualize_raw_pika and float(raw_action.get("pika.pose.valid", 0.0)) >= 0.5
+                else None,
+                raw_pika_quat=(
+                    float(raw_action.get("pika.rot.x", 0.0)),
+                    float(raw_action.get("pika.rot.y", 0.0)),
+                    float(raw_action.get("pika.rot.z", 0.0)),
+                    float(raw_action.get("pika.rot.w", 1.0)),
+                )
+                if visualize_raw_pika and float(raw_action.get("pika.pose.valid", 0.0)) >= 0.5
+                else None,
+                raw_axis_len_m=visualize_raw_axis_len_m,
             ):
                 return
         loop_idx += 1
@@ -466,6 +491,8 @@ def teleoperate_endpose(cfg: TeleoperateEndPoseConfig):
             dry_run_visualize=cfg.dry_run_visualize,
             visualizer=visualizer,
             visualize_target_axis_len_m=cfg.visualize_target_axis_len_m,
+            visualize_raw_pika=cfg.visualize_raw_pika,
+            visualize_raw_axis_len_m=cfg.visualize_raw_axis_len_m,
         )
     except KeyboardInterrupt:
         pass
