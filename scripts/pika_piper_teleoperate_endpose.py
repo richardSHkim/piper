@@ -26,6 +26,11 @@ from lerobot.utils.utils import init_logging, move_cursor_up
 from lerobot.utils.visualization_utils import init_rerun, log_rerun_data
 from lerobot_teleoperator_pika import MapPikaActionToPiperEndPose
 
+RAD_TO_001DEG = 180000.0 / math.pi
+_001DEG_TO_RAD = math.pi / 180000.0
+M_TO_001MM = 1_000_000.0
+_001MM_TO_M = 1.0 / 1_000_000.0
+
 
 @dataclass
 class TeleoperateEndPoseConfig:
@@ -53,7 +58,6 @@ class TeleoperateEndPoseConfig:
     visualize_width: int = 1000
     visualize_height: int = 720
     visualize_target_axis_len_m: float = 0.10
-    visualize_obs_axis_len_m: float = 0.08
 
 
 def _clamp(x: float, lo: float, hi: float) -> float:
@@ -158,10 +162,8 @@ class RGBFrameVisualizer:
         self,
         target_pos: tuple[float, float, float],
         target_quat: tuple[float, float, float, float],
-        obs_pos: tuple[float, float, float] | None,
-        obs_quat: tuple[float, float, float, float] | None,
         target_axis_len_m: float,
-        obs_axis_len_m: float,
+        cmd_ints: tuple[int, int, int, int, int, int],
     ) -> bool:
         for event in self.pygame.event.get():
             if event.type == self.pygame.QUIT:
@@ -175,14 +177,43 @@ class RGBFrameVisualizer:
 
         self.screen.fill((8, 8, 8))
         self._draw_frame((0.0, 0.0, 0.0), (0.0, 0.0, 0.0, 1.0), 0.12, "base", (120, 120, 220))
-        self._draw_frame(target_pos, target_quat, target_axis_len_m, "target", (255, 240, 120))
-        if obs_pos is not None and obs_quat is not None:
-            self._draw_frame(obs_pos, obs_quat, obs_axis_len_m, "obs", (120, 255, 255))
+        self._draw_frame(target_pos, target_quat, target_axis_len_m, "cmd(target)", (255, 240, 120))
         info = self.font.render("W/S or Up/Down: zoom, close window: exit", True, (220, 220, 220))
         self.screen.blit(info, (10, 10))
+        cmd_text = self.font.render(
+            f"EndPoseCtrl int: X={cmd_ints[0]} Y={cmd_ints[1]} Z={cmd_ints[2]} RX={cmd_ints[3]} RY={cmd_ints[4]} RZ={cmd_ints[5]}",
+            True,
+            (255, 220, 160),
+        )
+        self.screen.blit(cmd_text, (10, 38))
         self.pygame.display.flip()
         self.clock.tick(60)
         return True
+
+
+def _quantize_as_endpose_ctrl(action: RobotAction) -> tuple[RobotAction, tuple[int, int, int, int, int, int]]:
+    x = float(action.get("target_x", 0.0))
+    y = float(action.get("target_y", 0.0))
+    z = float(action.get("target_z", 0.0))
+    roll = float(action.get("target_roll", 0.0))
+    pitch = float(action.get("target_pitch", 0.0))
+    yaw = float(action.get("target_yaw", 0.0))
+
+    x_i = int(round(x * M_TO_001MM))
+    y_i = int(round(y * M_TO_001MM))
+    z_i = int(round(z * M_TO_001MM))
+    roll_i = int(round(roll * RAD_TO_001DEG))
+    pitch_i = int(round(pitch * RAD_TO_001DEG))
+    yaw_i = int(round(yaw * RAD_TO_001DEG))
+
+    quantized: RobotAction = dict(action)
+    quantized["target_x"] = x_i * _001MM_TO_M
+    quantized["target_y"] = y_i * _001MM_TO_M
+    quantized["target_z"] = z_i * _001MM_TO_M
+    quantized["target_roll"] = roll_i * _001DEG_TO_RAD
+    quantized["target_pitch"] = pitch_i * _001DEG_TO_RAD
+    quantized["target_yaw"] = yaw_i * _001DEG_TO_RAD
+    return quantized, (x_i, y_i, z_i, roll_i, pitch_i, yaw_i)
 
 
 def wait_for_stable_pose(teleop: Teleoperator, fps: int, cfg: TeleoperateEndPoseConfig) -> None:
@@ -277,7 +308,6 @@ def teleop_loop(
     dry_run_visualize: bool = False,
     visualizer: RGBFrameVisualizer | None = None,
     visualize_target_axis_len_m: float = 0.10,
-    visualize_obs_axis_len_m: float = 0.08,
 ):
     display_len = max(len(key) for key in robot.action_features)
     start = time.perf_counter()
@@ -289,38 +319,27 @@ def teleop_loop(
         raw_action = teleop.get_action()
         teleop_action = teleop_action_processor((raw_action, obs))
         robot_action_to_send = robot_action_processor((teleop_action, obs))
+        vis_action, cmd_ints = _quantize_as_endpose_ctrl(robot_action_to_send)
         if not dry_run_visualize:
             _ = robot.send_action(robot_action_to_send)
 
         if dry_run_visualize and visualizer is not None:
             target_pos = (
-                float(robot_action_to_send.get("target_x", 0.0)),
-                float(robot_action_to_send.get("target_y", 0.0)),
-                float(robot_action_to_send.get("target_z", 0.0)),
+                float(vis_action.get("target_x", 0.0)),
+                float(vis_action.get("target_y", 0.0)),
+                float(vis_action.get("target_z", 0.0)),
             )
             target_quat = _rpy_to_quat(
-                float(robot_action_to_send.get("target_roll", 0.0)),
-                float(robot_action_to_send.get("target_pitch", 0.0)),
-                float(robot_action_to_send.get("target_yaw", 0.0)),
+                float(vis_action.get("target_roll", 0.0)),
+                float(vis_action.get("target_pitch", 0.0)),
+                float(vis_action.get("target_yaw", 0.0)),
             )
-
-            obs_pos = None
-            obs_quat = None
-            if all(k in obs for k in ("endpose.x", "endpose.y", "endpose.z", "endpose.roll", "endpose.pitch", "endpose.yaw")):
-                obs_pos = (float(obs["endpose.x"]), float(obs["endpose.y"]), float(obs["endpose.z"]))
-                obs_quat = _rpy_to_quat(
-                    float(obs["endpose.roll"]),
-                    float(obs["endpose.pitch"]),
-                    float(obs["endpose.yaw"]),
-                )
 
             if not visualizer.update(
                 target_pos=target_pos,
                 target_quat=target_quat,
-                obs_pos=obs_pos,
-                obs_quat=obs_quat,
                 target_axis_len_m=visualize_target_axis_len_m,
-                obs_axis_len_m=visualize_obs_axis_len_m,
+                cmd_ints=cmd_ints,
             ):
                 return
         loop_idx += 1
@@ -416,7 +435,6 @@ def teleoperate_endpose(cfg: TeleoperateEndPoseConfig):
             dry_run_visualize=cfg.dry_run_visualize,
             visualizer=visualizer,
             visualize_target_axis_len_m=cfg.visualize_target_axis_len_m,
-            visualize_obs_axis_len_m=cfg.visualize_obs_axis_len_m,
         )
     except KeyboardInterrupt:
         pass
