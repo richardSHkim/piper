@@ -252,12 +252,30 @@ def main() -> None:
             now = time.perf_counter()
             if now - last_log >= args.print_interval:
                 elapsed = now - last_log
-                print(
-                    f"[run] loop_hz={loop_count / max(elapsed, 1e-6):.1f}, "
-                    f"j1={robot_action.get('joint_1.pos', 0.0):.3f}, "
-                    f"gripper={robot_action.get('gripper.pos', 0.0):.3f}, "
-                    f"pose_valid={raw_action.get('pika.pose.valid', 0.0):.0f}"
-                )
+                if args.command_mode == "endpose":
+                    tgt = map_step.get_target_pose()
+                    if tgt is not None:
+                        roll, pitch, yaw = _rotation_matrix_to_rpy(tgt[:3, :3])
+                        target_str = (
+                            f"target_xyz=({tgt[0,3]:.3f},{tgt[1,3]:.3f},{tgt[2,3]:.3f})m "
+                            f"target_rpy=({roll:.3f},{pitch:.3f},{yaw:.3f})rad"
+                        )
+                    else:
+                        target_str = "target_pose=none"
+                    print(
+                        f"[run] loop_hz={loop_count / max(elapsed, 1e-6):.1f}, "
+                        f"mode=endpose, {target_str}, "
+                        f"obs_j1={obs.get('joint_1.pos', 0.0):.3f}, "
+                        f"gripper={robot_action.get('gripper.pos', 0.0):.3f}, "
+                        f"pose_valid={raw_action.get('pika.pose.valid', 0.0):.0f}"
+                    )
+                else:
+                    print(
+                        f"[run] loop_hz={loop_count / max(elapsed, 1e-6):.1f}, "
+                        f"j1={robot_action.get('joint_1.pos', 0.0):.3f}, "
+                        f"gripper={robot_action.get('gripper.pos', 0.0):.3f}, "
+                        f"pose_valid={raw_action.get('pika.pose.valid', 0.0):.0f}"
+                    )
                 last_log = now
                 loop_count = 0
 
