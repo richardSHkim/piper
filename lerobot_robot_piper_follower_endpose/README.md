@@ -24,4 +24,7 @@ robot:
   type: piper_follower_endpose
   can_name: can_follower
   id: piper_follower_endpose_01
+  disable_on_disconnect: false
 ```
+
+`disable_on_disconnect=false` keeps motors enabled on exit so the arm keeps holding pose.

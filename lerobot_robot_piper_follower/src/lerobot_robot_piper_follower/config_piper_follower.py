@@ -17,5 +17,6 @@ class PiperFollowerConfig(RobotConfig):
     gripper_effort: int = 1000
     gripper_opening_m: float = 0.07
     startup_enable_timeout_s: float = 5.0
-    disable_on_disconnect: bool = True
+    # Keep servo holding by default on script exit to avoid gravity drop.
+    disable_on_disconnect: bool = False
     cameras: dict[str, CameraConfig] = field(default_factory=dict)

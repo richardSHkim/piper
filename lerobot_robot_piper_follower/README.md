@@ -19,6 +19,9 @@ robot:
   type: piper_follower
   can_name: can_follower
   id: piper_follower_01
+  disable_on_disconnect: false
 ```
 
 Default CAN names expected for this project are `can_leader` and `can_follower`.
+
+`disable_on_disconnect=false` keeps motors enabled on exit so the arm keeps holding pose.
