@@ -3,6 +3,7 @@
 import argparse
 import time
 from collections import deque
+import math
 
 from lerobot.processor import RobotProcessorPipeline
 from lerobot.processor.converters import robot_action_observation_to_transition, transition_to_robot_action
@@ -21,6 +22,7 @@ def make_teleop_action_processor(args: argparse.Namespace) -> tuple[RobotProcess
         max_delta_q=args.ik_max_delta_q,
         pos_tol=args.ik_pos_tol,
         rot_tol=args.ik_rot_tol,
+        solve_ik=(args.command_mode == "joint"),
     )
     pipeline = RobotProcessorPipeline(
         steps=[step],
@@ -52,6 +54,23 @@ def _format_joint_action(robot_action: dict) -> str:
     return f"{joints}, gripper={robot_action.get('gripper.pos', 0.0):.3f}"
 
 
+def _rotation_matrix_to_rpy(rot) -> tuple[float, float, float]:
+    # XYZ roll-pitch-yaw
+    sy = -rot[2, 0]
+    sy = max(min(sy, 1.0), -1.0)
+    pitch = math.asin(sy)
+    cp = math.cos(pitch)
+
+    if abs(cp) > 1e-6:
+        roll = math.atan2(rot[2, 1], rot[2, 2])
+        yaw = math.atan2(rot[1, 0], rot[0, 0])
+    else:
+        # Gimbal lock fallback
+        roll = 0.0
+        yaw = math.atan2(-rot[0, 1], rot[1, 1])
+    return roll, pitch, yaw
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="PIKA Sense -> PiPER follower teleoperation loop")
     parser.add_argument("--teleop-port", default="/dev/ttyUSB0", help="PIKA Sense serial port")
@@ -60,6 +79,12 @@ def main() -> None:
     parser.add_argument("--fps", type=int, default=50, help="Control loop rate")
     parser.add_argument("--speed-ratio", type=int, default=60, help="PiPER speed ratio [0..100]")
     parser.add_argument("--gripper-effort", type=int, default=1000, help="PiPER gripper effort [0..5000]")
+    parser.add_argument(
+        "--command-mode",
+        choices=["endpose", "joint"],
+        default="endpose",
+        help="Send EndPoseCtrl(cartesian) or JointCtrl(joint) to PiPER",
+    )
     parser.add_argument("--linear-scale", type=float, default=1.0, help="Scale for tracker translation delta")
     parser.add_argument("--angular-scale", type=float, default=1.0, help="Scale for tracker rotation delta")
     parser.add_argument("--max-delta-pos-m", type=float, default=0.03, help="Max translation delta per frame")
@@ -180,12 +205,48 @@ def main() -> None:
             raw_action = teleop.get_action()
             robot_action = teleop_action_processor((raw_action, obs))
             if args.dry_run:
+                tgt = map_step.get_target_pose()
+                if tgt is not None:
+                    roll, pitch, yaw = _rotation_matrix_to_rpy(tgt[:3, :3])
+                    target_str = (
+                        f"target_xyz_m=({tgt[0,3]:.4f}, {tgt[1,3]:.4f}, {tgt[2,3]:.4f}), "
+                        f"target_rpy_rad=({roll:.4f}, {pitch:.4f}, {yaw:.4f})"
+                    )
+                else:
+                    target_str = "target_pose=none"
                 print(
                     f"[dry-run] pika_pose: {_format_pika_pose(raw_action)} | "
-                    f"mapped_action: {_format_joint_action(robot_action)}"
+                    f"{target_str} | mapped_action: {_format_joint_action(robot_action)}"
                 )
             else:
-                robot.send_action(robot_action)
+                if args.command_mode == "joint":
+                    robot.send_action(robot_action)
+                else:
+                    tgt = map_step.get_target_pose()
+                    if tgt is not None:
+                        roll, pitch, yaw = _rotation_matrix_to_rpy(tgt[:3, :3])
+                        x = int(round(float(tgt[0, 3]) * 1_000_000.0))  # m -> 0.001mm
+                        y = int(round(float(tgt[1, 3]) * 1_000_000.0))
+                        z = int(round(float(tgt[2, 3]) * 1_000_000.0))
+                        rx = int(round(math.degrees(roll) * 1000.0))     # rad -> 0.001deg
+                        ry = int(round(math.degrees(pitch) * 1000.0))
+                        rz = int(round(math.degrees(yaw) * 1000.0))
+                        robot._arm.MotionCtrl_2(0x01, 0x00, int(args.speed_ratio), 0x00)
+                        robot._arm.EndPoseCtrl(x, y, z, rx, ry, rz)
+                        if "gripper.pos" in robot_action:
+                            stroke_001mm = int(
+                                round(
+                                    float(robot_action["gripper.pos"])
+                                    * float(robot.config.gripper_opening_m)
+                                    * 1_000_000.0
+                                )
+                            )
+                            robot._arm.GripperCtrl(
+                                abs(stroke_001mm),
+                                int(args.gripper_effort),
+                                0x01,
+                                0x00,
+                            )
 
             loop_count += 1
             now = time.perf_counter()

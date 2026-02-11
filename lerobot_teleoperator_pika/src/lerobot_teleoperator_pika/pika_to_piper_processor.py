@@ -178,6 +178,7 @@ class MapPikaActionToPiperJoints(RobotActionProcessorStep):
     max_delta_q: float = 0.08
     pos_tol: float = 2e-3
     rot_tol: float = 2e-2
+    solve_ik: bool = True
     workspace_min_xyz: tuple[float, float, float] = (-0.45, -0.45, 0.02)
     workspace_max_xyz: tuple[float, float, float] = (0.70, 0.45, 0.75)
     _ik: PiperNumericalIK = field(init=False, repr=False)
@@ -250,6 +251,11 @@ class MapPikaActionToPiperJoints(RobotActionProcessorStep):
         self._last_input_rot = rot
         self._is_initialized = True
 
+    def get_target_pose(self) -> np.ndarray | None:
+        if self._target_pose is None:
+            return None
+        return self._target_pose.copy()
+
     def action(self, action: RobotAction) -> RobotAction:
         pos, rot = self._parse_pose(action)
         gripper = float(action.get("pika.gripper.pos", 0.0))
@@ -284,19 +290,20 @@ class MapPikaActionToPiperJoints(RobotActionProcessorStep):
             self.angular_scale * drot_robot
         )
 
-        try:
-            self._q = self._ik.solve(
-                initial_q=self._q,
-                target_pose=self._target_pose,
-                max_iterations=self.max_iterations,
-                damping=self.damping,
-                max_delta_q=self.max_delta_q,
-                pos_tol=self.pos_tol,
-                rot_tol=self.rot_tol,
-            )
-        except RuntimeError:
-            # Keep last valid q if IK fails for this frame.
-            pass
+        if self.solve_ik:
+            try:
+                self._q = self._ik.solve(
+                    initial_q=self._q,
+                    target_pose=self._target_pose,
+                    max_iterations=self.max_iterations,
+                    damping=self.damping,
+                    max_delta_q=self.max_delta_q,
+                    pos_tol=self.pos_tol,
+                    rot_tol=self.rot_tol,
+                )
+            except RuntimeError:
+                # Keep last valid q if IK fails for this frame.
+                pass
 
         self._last_input_pos = pos
         self._last_input_rot = rot
