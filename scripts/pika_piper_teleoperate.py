@@ -54,6 +54,11 @@ def main() -> None:
     parser.add_argument("--ik-pos-tol", type=float, default=2e-3, help="IK position tolerance")
     parser.add_argument("--ik-rot-tol", type=float, default=2e-2, help="IK orientation tolerance")
     parser.add_argument("--print-interval", type=float, default=1.0, help="Status log period (s)")
+    parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Do not send actions to PiPER; only print transformed action values",
+    )
     parser.add_argument("--startup-move-zero", action="store_true", help="Move PiPER to zero pose before arming")
     parser.add_argument("--startup-zero-settle-s", type=float, default=1.0, help="Wait time after zero move")
     parser.add_argument(
@@ -102,7 +107,11 @@ def main() -> None:
 
     if args.startup_move_zero:
         zero_gripper = float(startup_action.get("pika.gripper.pos", 1.0)) if args.startup_sync_gripper else 1.0
-        robot.send_action(_make_zero_action(zero_gripper))
+        zero_action = _make_zero_action(zero_gripper)
+        if args.dry_run:
+            print(f"[dry-run] startup zero action={zero_action}")
+        else:
+            robot.send_action(zero_action)
         print(
             f"[startup] moved to zero pose (gripper={zero_gripper:.3f}), "
             f"settling {args.startup_zero_settle_s:.1f}s"
@@ -154,7 +163,10 @@ def main() -> None:
             obs = robot.get_observation()
             raw_action = teleop.get_action()
             robot_action = teleop_action_processor((raw_action, obs))
-            robot.send_action(robot_action)
+            if args.dry_run:
+                print(f"[dry-run] action={robot_action}")
+            else:
+                robot.send_action(robot_action)
 
             loop_count += 1
             now = time.perf_counter()
