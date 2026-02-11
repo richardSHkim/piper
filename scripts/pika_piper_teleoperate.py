@@ -198,6 +198,8 @@ class PikaToPiperJointMapper:
         self._last_input_rot: np.ndarray | None = None
         self._target_pose: np.ndarray | None = None
         self._q: np.ndarray | None = None
+        self._last_ik_time_ms: float = 0.0
+        self._last_ik_success: bool = False
 
     def _read_observation_joints(self, obs: dict | None) -> np.ndarray:
         if not isinstance(obs, dict):
@@ -283,6 +285,7 @@ class PikaToPiperJointMapper:
             self.cfg.angular_scale * drot_robot
         )
 
+        ik_start = time.perf_counter()
         try:
             self._q = self.ik.solve(
                 initial_q=self._q,
@@ -293,12 +296,22 @@ class PikaToPiperJointMapper:
                 pos_tol=self.cfg.pos_tol,
                 rot_tol=self.cfg.rot_tol,
             )
+            self._last_ik_success = True
         except RuntimeError:
-            pass
+            self._last_ik_success = False
+        self._last_ik_time_ms = (time.perf_counter() - ik_start) * 1e3
 
         self._last_input_pos = pos
         self._last_input_rot = rot
         return self._build_action(self._q, gripper)
+
+    @property
+    def last_ik_time_ms(self) -> float:
+        return self._last_ik_time_ms
+
+    @property
+    def last_ik_success(self) -> bool:
+        return self._last_ik_success
 
 
 def _quat_angle_rad(q1: tuple[float, float, float, float], q2: tuple[float, float, float, float]) -> float:
@@ -434,7 +447,10 @@ def teleop_loop(
         dt_s = time.perf_counter() - loop_start
         precise_sleep(max(1 / fps - dt_s, 0.0))
         loop_s = time.perf_counter() - loop_start
-        print(f"Teleop loop time: {loop_s * 1e3:.2f}ms ({1 / loop_s:.0f} Hz)")
+        print(
+            f"Teleop loop: {loop_s * 1e3:.2f}ms ({1 / loop_s:.0f} Hz), "
+            f"IK: {mapper.last_ik_time_ms:.2f}ms, ik_ok={int(mapper.last_ik_success)}"
+        )
         move_cursor_up(1)
 
         if duration is not None and time.perf_counter() - start >= duration:
