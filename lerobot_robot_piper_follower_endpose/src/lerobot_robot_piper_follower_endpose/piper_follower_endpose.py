@@ -35,6 +35,7 @@ class PiperFollowerEndPose(Robot):
         self.config = config
         self._arm = None
         self._connected = False
+        self._endpose_mode_active = False
         self.cameras = make_cameras_from_configs(config.cameras)
 
     @property
@@ -47,6 +48,12 @@ class PiperFollowerEndPose(Robot):
             "joint_5.pos": float,
             "joint_6.pos": float,
             "gripper.pos": float,
+            "endpose.x": float,
+            "endpose.y": float,
+            "endpose.z": float,
+            "endpose.roll": float,
+            "endpose.pitch": float,
+            "endpose.yaw": float,
         }
 
     @property
@@ -127,10 +134,22 @@ class PiperFollowerEndPose(Robot):
         raw = float(self._arm.GetArmGripperMsgs().gripper_state.grippers_angle) * _001MM_TO_M
         return _clamp(raw / self.config.gripper_opening_m, 0.0, 1.0)
 
+    def _read_endpose(self) -> tuple[float, float, float, float, float, float]:
+        end_pose = self._arm.GetArmEndPoseMsgs().end_pose
+        return (
+            float(end_pose.X_axis) * _001MM_TO_M,
+            float(end_pose.Y_axis) * _001MM_TO_M,
+            float(end_pose.Z_axis) * _001MM_TO_M,
+            float(end_pose.RX_axis) * _001DEG_TO_RAD,
+            float(end_pose.RY_axis) * _001DEG_TO_RAD,
+            float(end_pose.RZ_axis) * _001DEG_TO_RAD,
+        )
+
     @check_if_not_connected
     def get_observation(self) -> RobotObservation:
         joints = self._read_joint_rad()
         gripper = self._read_gripper_ratio()
+        x, y, z, roll, pitch, yaw = self._read_endpose()
         obs_dict: RobotObservation = {
             "joint_1.pos": joints[0],
             "joint_2.pos": joints[1],
@@ -139,6 +158,12 @@ class PiperFollowerEndPose(Robot):
             "joint_5.pos": joints[4],
             "joint_6.pos": joints[5],
             "gripper.pos": gripper,
+            "endpose.x": x,
+            "endpose.y": y,
+            "endpose.z": z,
+            "endpose.roll": roll,
+            "endpose.pitch": pitch,
+            "endpose.yaw": yaw,
         }
         for cam_key, cam in self.cameras.items():
             obs_dict[cam_key] = cam.async_read()
@@ -169,8 +194,10 @@ class PiperFollowerEndPose(Robot):
         pitch = float(action["target_pitch"])
         yaw = float(action["target_yaw"])
 
-        # Switch to EndPose control mode.
-        self._arm.MotionCtrl_2(0x01, 0x00, int(self.config.speed_ratio), 0x00)
+        # Switch to EndPose control mode once, then keep sending Cartesian targets.
+        if not self._endpose_mode_active:
+            self._arm.MotionCtrl_2(0x01, 0x00, int(self.config.speed_ratio), 0x00)
+            self._endpose_mode_active = True
         self._arm.EndPoseCtrl(
             int(round(x * M_TO_001MM)),
             int(round(y * M_TO_001MM)),
@@ -215,5 +242,6 @@ class PiperFollowerEndPose(Robot):
                 cam.disconnect()
             if self._arm is not None:
                 self._arm.DisconnectPort()
+            self._endpose_mode_active = False
             self._connected = False
             logger.info("%s disconnected", self.name)

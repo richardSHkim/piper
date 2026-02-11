@@ -29,6 +29,7 @@ class MapPikaActionToPiperEndPose(RobotActionProcessorStep):
 
     linear_scale: float = 1.0
     angular_scale: float = 1.0
+    ignore_invalid_pose: bool = True
     max_delta_pos_m: float = 0.03
     max_delta_rot_rad: float = 0.30
     workspace_min_xyz: tuple[float, float, float] = (-0.45, -0.45, 0.02)
@@ -51,6 +52,41 @@ class MapPikaActionToPiperEndPose(RobotActionProcessorStep):
         if not all(k in obs for k in keys):
             return np.zeros(6, dtype=np.float64)
         return np.array([float(obs[k]) for k in keys], dtype=np.float64)
+
+    def _rpy_to_matrix(self, roll: float, pitch: float, yaw: float) -> np.ndarray:
+        cr, sr = np.cos(roll), np.sin(roll)
+        cp, sp = np.cos(pitch), np.sin(pitch)
+        cy, sy = np.cos(yaw), np.sin(yaw)
+        rx = np.array([[1.0, 0.0, 0.0], [0.0, cr, -sr], [0.0, sr, cr]], dtype=np.float64)
+        ry = np.array([[cp, 0.0, sp], [0.0, 1.0, 0.0], [-sp, 0.0, cp]], dtype=np.float64)
+        rz = np.array([[cy, -sy, 0.0], [sy, cy, 0.0], [0.0, 0.0, 1.0]], dtype=np.float64)
+        return rz @ ry @ rx
+
+    def _read_observation_endpose(self) -> np.ndarray | None:
+        obs = self.transition.get(TransitionKey.OBSERVATION)
+        if not isinstance(obs, dict):
+            return None
+        keys = (
+            "endpose.x",
+            "endpose.y",
+            "endpose.z",
+            "endpose.roll",
+            "endpose.pitch",
+            "endpose.yaw",
+        )
+        if not all(k in obs for k in keys):
+            return None
+
+        pose = np.eye(4, dtype=np.float64)
+        pose[0, 3] = float(obs["endpose.x"])
+        pose[1, 3] = float(obs["endpose.y"])
+        pose[2, 3] = float(obs["endpose.z"])
+        pose[:3, :3] = self._rpy_to_matrix(
+            float(obs["endpose.roll"]),
+            float(obs["endpose.pitch"]),
+            float(obs["endpose.yaw"]),
+        )
+        return pose
 
     def _parse_pose(self, action: RobotAction) -> tuple[np.ndarray, np.ndarray]:
         pos = np.array(
@@ -89,12 +125,34 @@ class MapPikaActionToPiperEndPose(RobotActionProcessorStep):
         return roll, pitch, yaw
 
     def action(self, action: RobotAction) -> RobotAction:
+        pose_valid = float(action.get("pika.pose.valid", 1.0)) >= 0.5
         pos, rot = self._parse_pose(action)
         gripper = float(action.get("pika.gripper.pos", 0.0))
 
+        if self.ignore_invalid_pose and not pose_valid:
+            if not self._is_initialized:
+                self._q = self._read_observation_joints()
+                self._target_pose = self._read_observation_endpose()
+                if self._target_pose is None:
+                    self._target_pose = self._ik.fk(self._q)
+                self._is_initialized = True
+            assert self._target_pose is not None
+            roll, pitch, yaw = self._rotation_matrix_to_rpy(self._target_pose[:3, :3])
+            return {
+                "target_x": float(self._target_pose[0, 3]),
+                "target_y": float(self._target_pose[1, 3]),
+                "target_z": float(self._target_pose[2, 3]),
+                "target_roll": roll,
+                "target_pitch": pitch,
+                "target_yaw": yaw,
+                "gripper.pos": max(0.0, min(1.0, gripper)),
+            }
+
         if not self._is_initialized:
             self._q = self._read_observation_joints()
-            self._target_pose = self._ik.fk(self._q)
+            self._target_pose = self._read_observation_endpose()
+            if self._target_pose is None:
+                self._target_pose = self._ik.fk(self._q)
             self._last_input_pos = pos
             self._last_input_rot = rot
             self._is_initialized = True

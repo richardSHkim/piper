@@ -47,6 +47,8 @@ class TeleoperateEndPoseConfig:
     startup_max_pos_delta_m: float = 0.002
     startup_max_rot_delta_rad: float = 0.03
     startup_timeout_s: float = 15.0
+    debug_loopback: bool = False
+    debug_every_n: int = 10
 
 
 def _clamp(x: float, lo: float, hi: float) -> float:
@@ -152,9 +154,12 @@ def teleop_loop(
     display_data: bool = False,
     duration: float | None = None,
     display_compressed_images: bool = False,
+    debug_loopback: bool = False,
+    debug_every_n: int = 10,
 ):
     display_len = max(len(key) for key in robot.action_features)
     start = time.perf_counter()
+    loop_idx = 0
 
     while True:
         loop_start = time.perf_counter()
@@ -163,6 +168,31 @@ def teleop_loop(
         teleop_action = teleop_action_processor((raw_action, obs))
         robot_action_to_send = robot_action_processor((teleop_action, obs))
         _ = robot.send_action(robot_action_to_send)
+        loop_idx += 1
+
+        if debug_loopback and loop_idx % max(1, debug_every_n) == 0:
+            logging.info(
+                (
+                    "raw pose valid=%.0f pos=(%.4f, %.4f, %.4f) target=(%.4f, %.4f, %.4f, %.4f, %.4f, %.4f) "
+                    "obs_endpose=(%.4f, %.4f, %.4f, %.4f, %.4f, %.4f)"
+                ),
+                float(raw_action.get("pika.pose.valid", 0.0)),
+                float(raw_action.get("pika.pos.x", 0.0)),
+                float(raw_action.get("pika.pos.y", 0.0)),
+                float(raw_action.get("pika.pos.z", 0.0)),
+                float(robot_action_to_send.get("target_x", 0.0)),
+                float(robot_action_to_send.get("target_y", 0.0)),
+                float(robot_action_to_send.get("target_z", 0.0)),
+                float(robot_action_to_send.get("target_roll", 0.0)),
+                float(robot_action_to_send.get("target_pitch", 0.0)),
+                float(robot_action_to_send.get("target_yaw", 0.0)),
+                float(obs.get("endpose.x", 0.0)),
+                float(obs.get("endpose.y", 0.0)),
+                float(obs.get("endpose.z", 0.0)),
+                float(obs.get("endpose.roll", 0.0)),
+                float(obs.get("endpose.pitch", 0.0)),
+                float(obs.get("endpose.yaw", 0.0)),
+            )
 
         if display_data:
             obs_transition = robot_observation_processor(obs)
@@ -223,6 +253,8 @@ def teleoperate_endpose(cfg: TeleoperateEndPoseConfig):
             robot_action_processor=robot_action_processor,
             robot_observation_processor=robot_observation_processor,
             display_compressed_images=display_compressed_images,
+            debug_loopback=cfg.debug_loopback,
+            debug_every_n=cfg.debug_every_n,
         )
     except KeyboardInterrupt:
         pass
