@@ -17,20 +17,19 @@ from lerobot.processor import (
     make_default_processors,
 )
 from lerobot.processor.converters import robot_action_observation_to_transition, transition_to_robot_action
-from lerobot.robots import Robot, make_robot_from_config
-from lerobot.teleoperators import Teleoperator, make_teleoperator_from_config
+from lerobot.robots import Robot, RobotConfig, make_robot_from_config
+from lerobot.teleoperators import Teleoperator, TeleoperatorConfig, make_teleoperator_from_config
 from lerobot.utils.import_utils import register_third_party_plugins
 from lerobot.utils.robot_utils import precise_sleep
 from lerobot.utils.utils import init_logging, move_cursor_up
 from lerobot.utils.visualization_utils import init_rerun, log_rerun_data
-from lerobot_robot_piper_follower_endpose import PiperFollowerEndPoseConfig
-from lerobot_teleoperator_pika import MapPikaActionToPiperEndPose, PikaTeleoperatorConfig
+from lerobot_teleoperator_pika import MapPikaActionToPiperEndPose
 
 
 @dataclass
 class TeleoperateEndPoseConfig:
-    teleop: PikaTeleoperatorConfig
-    robot: PiperFollowerEndPoseConfig
+    teleop: TeleoperatorConfig
+    robot: RobotConfig
     fps: int = 60
     teleop_time_s: float | None = None
     display_data: bool = False
