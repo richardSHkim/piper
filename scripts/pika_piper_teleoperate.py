@@ -21,7 +21,7 @@ from lerobot.robots import Robot, RobotConfig, make_robot_from_config
 from lerobot.teleoperators import Teleoperator, TeleoperatorConfig, make_teleoperator_from_config
 from lerobot.utils.import_utils import register_third_party_plugins
 from lerobot.utils.robot_utils import precise_sleep
-from lerobot.utils.utils import init_logging, move_cursor_up
+from lerobot.utils.utils import init_logging
 from lerobot.utils.visualization_utils import init_rerun, log_rerun_data
 
 
@@ -458,10 +458,11 @@ def teleop_loop(
     duration: float | None = None,
     display_compressed_images: bool = False,
 ):
-    display_len = max(len(key) for key in robot.action_features)
     start = time.perf_counter()
+    iter_idx = 0
 
     while True:
+        iter_idx += 1
         loop_start = time.perf_counter()
         obs = robot.get_observation()
         raw_action = teleop.get_action()
@@ -476,27 +477,25 @@ def teleop_loop(
                 action=mapped_action,
                 compress_images=display_compressed_images,
             )
-
-            print("\n" + "-" * (display_len + 10))
-            print(f"{'NAME':<{display_len}} | {'NORM':>7}")
-            for motor, value in robot_action_to_send.items():
-                print(f"{motor:<{display_len}} | {value:>7.2f}")
-            move_cursor_up(len(robot_action_to_send) + 3)
+            action_str = ", ".join(
+                [f"{k}={float(v):.4f}" for k, v in robot_action_to_send.items() if isinstance(v, (int, float))]
+            )
+            print(f"[action] iter={iter_idx} {action_str}")
 
         dt_s = time.perf_counter() - loop_start
         precise_sleep(max(1 / fps - dt_s, 0.0))
         loop_s = time.perf_counter() - loop_start
         if mapper.last_ik_success:
             print(
-                f"Teleop loop: {loop_s * 1e3:.2f}ms ({1 / loop_s:.0f} Hz), "
-                f"IK: {mapper.last_ik_time_ms:.2f}ms, ik_ok=1"
+                f"[loop] iter={iter_idx} loop_ms={loop_s * 1e3:.2f} hz={1 / loop_s:.1f} "
+                f"ik_ms={mapper.last_ik_time_ms:.2f} ik_ok=1 pose_valid={int(float(raw_action.get('pika.pose.valid', 0.0)) >= 0.5)}"
             )
         else:
             print(
-                f"Teleop loop: {loop_s * 1e3:.2f}ms ({1 / loop_s:.0f} Hz), "
-                f"IK: {mapper.last_ik_time_ms:.2f}ms, ik_ok=0, reason={mapper.last_ik_fail_reason}"
+                f"[loop] iter={iter_idx} loop_ms={loop_s * 1e3:.2f} hz={1 / loop_s:.1f} "
+                f"ik_ms={mapper.last_ik_time_ms:.2f} ik_ok=0 pose_valid={int(float(raw_action.get('pika.pose.valid', 0.0)) >= 0.5)} "
+                f"reason={mapper.last_ik_fail_reason}"
             )
-        move_cursor_up(1)
 
         if duration is not None and time.perf_counter() - start >= duration:
             return
