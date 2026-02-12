@@ -36,6 +36,7 @@ RAD_TO_001DEG = 180000.0 / math.pi
 _001DEG_TO_RAD = math.pi / 180000.0
 ZERO_SPEED_RATIO_DEFAULT = 30
 ZERO_SETTLE_S_DEFAULT = 3.0
+TRANSLATION_GAIN_DEFAULT = 3.0
 
 
 def wait_enable(arm: C_PiperInterface_V2, timeout_s: float) -> None:
@@ -155,6 +156,12 @@ def main() -> None:
     parser.add_argument("--calib", type=str, default="calib.json")
     parser.add_argument("--can", type=str, default="can_follower")
     parser.add_argument("--speed-ratio", type=int, default=70, help="PiPER MotionCtrl_2 speed ratio [0..100]")
+    parser.add_argument(
+        "--translation-gain",
+        type=float,
+        default=TRANSLATION_GAIN_DEFAULT,
+        help="Extra translation gain on top of calibration scale s",
+    )
     parser.add_argument("--period", type=float, default=0.02, help="Loop period in seconds")
     parser.add_argument("--enable-timeout", type=float, default=5.0)
     parser.add_argument("--disable-on-exit", action="store_true")
@@ -200,6 +207,8 @@ def main() -> None:
         raise ValueError("period must be > 0")
     if not (0 <= args.speed_ratio <= 100):
         raise ValueError("speed-ratio must be in [0, 100]")
+    if args.translation_gain <= 0:
+        raise ValueError("translation-gain must be > 0")
     if args.max_pika_step_m <= 0 or args.max_base_step_m <= 0:
         raise ValueError("max step values must be > 0")
     if not (0 <= args.gripper_effort <= 5000):
@@ -267,7 +276,7 @@ def main() -> None:
         print(
             "[start] "
             f"can={args.can}, pika={args.pika_device_key}@{args.pika_port}, "
-            f"s={s:.6f}, period={args.period:.3f}s"
+            f"s={s:.6f}, gain={args.translation_gain:.2f}, period={args.period:.3f}s"
         )
         print(
             "[seed] "
@@ -285,7 +294,7 @@ def main() -> None:
             p_prev = p_cur
 
             dp_pika = clamp_vec(dp_pika, args.max_pika_step_m)
-            dp_base = s * (R_map @ dp_pika)
+            dp_base = (s * args.translation_gain) * (R_map @ dp_pika)
             dp_base = clamp_vec(dp_base, args.max_base_step_m)
 
             target_x += float(dp_base[0])
