@@ -297,6 +297,12 @@ def main() -> None:
     parser.add_argument("--max-pika-step-m", type=float, default=0.05, help="Reject/clip sudden tracker jumps")
     parser.add_argument("--max-base-step-m", type=float, default=0.03, help="Clip cartesian increment per cycle")
     parser.add_argument(
+        "--max-rot-step-deg",
+        type=float,
+        default=2.0,
+        help="Clip rotational increment per cycle after mapping (degrees)",
+    )
+    parser.add_argument(
         "--pika-axis-order",
         type=str,
         default="xyz",
@@ -349,6 +355,8 @@ def main() -> None:
         raise ValueError("translation-gain must be > 0")
     if args.max_pika_step_m <= 0 or args.max_base_step_m <= 0:
         raise ValueError("max step values must be > 0")
+    if args.max_rot_step_deg <= 0:
+        raise ValueError("max-rot-step-deg must be > 0")
     if not (0 < args.dp_ema_alpha <= 1.0):
         raise ValueError("dp-ema-alpha must be in (0, 1]")
     if args.jitter_deadband_m < 0:
@@ -436,6 +444,7 @@ def main() -> None:
                 f"dp_ema_alpha={args.dp_ema_alpha:.2f}, "
                 f"jitter_deadband_m={args.jitter_deadband_m:.4f}"
             )
+        print(f"[rot] max_rot_step_deg={args.max_rot_step_deg:.2f}")
         print(
             "[seed] "
             f"target=({target_x:.4f}, {target_y:.4f}, {target_z:.4f}) m, "
@@ -457,6 +466,7 @@ def main() -> None:
             q_delta = normalize_quat_xyzw(q_delta)
             d_rotvec_pika = quat_to_rotvec_xyzw(q_delta)
             d_rotvec_base = R_map @ d_rotvec_pika
+            d_rotvec_base = clamp_vec(d_rotvec_base, math.radians(args.max_rot_step_deg))
             q_delta_base = rotvec_to_quat_xyzw(d_rotvec_base)
             q_target = normalize_quat_xyzw(quat_mul_xyzw(q_delta_base, q_target))
             target_roll, target_pitch, target_yaw = quat_to_rpy_xyzw(q_target)
