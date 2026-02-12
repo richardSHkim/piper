@@ -37,6 +37,14 @@ _001DEG_TO_RAD = math.pi / 180000.0
 ZERO_SPEED_RATIO_DEFAULT = 30
 ZERO_SETTLE_S_DEFAULT = 3.0
 TRANSLATION_GAIN_DEFAULT = 3.0
+END_POSE_INIT_M_RAD = (
+    0.057,  # X: 57.0 mm
+    0.0,    # Y: 0.0 mm
+    0.260,  # Z: 260.0 mm
+    0.0,    # Roll: 0.0 deg
+    math.radians(85.0),  # Pitch: 85.0 deg
+    0.0,    # Yaw: 0.0 deg
+)
 
 
 def wait_enable(arm: C_PiperInterface_V2, timeout_s: float) -> None:
@@ -311,7 +319,7 @@ def main() -> None:
             timeout_s=args.ready_timeout_s,
         )
 
-        target_x, target_y, target_z, target_roll, target_pitch, target_yaw = read_endpose_m_rad(arm)
+        target_x, target_y, target_z, target_roll, target_pitch, target_yaw = END_POSE_INIT_M_RAD
         print(
             "[ready] piper initialized (zero + gripper open), pika pose stable. "
             "Press Enter to start teleop."
