@@ -197,11 +197,12 @@ def average_pose(tracker: PikaAdapter, secs: float = 0.25, hz: float = 120.0) ->
 
 @dataclass
 class CalibConfig:
-    # Define what robot base directions mean (default: +X right, +Y forward, +Z up)
-    # If your robot uses different convention, change these vectors.
-    right_vec: np.ndarray = field(default_factory=lambda: np.array([1.0, 0.0, 0.0], dtype=np.float64))
-    forward_vec: np.ndarray = field(default_factory=lambda: np.array([0.0, 1.0, 0.0], dtype=np.float64))
-    up_vec: np.ndarray = field(default_factory=lambda: np.array([0.0, 0.0, 1.0], dtype=np.float64))
+    # Robot base convention used by this script:
+    #   +X: forward, +Y: left, +Z: up
+    # If your robot uses a different convention, override these vectors via CLI.
+    x_vec: np.ndarray = field(default_factory=lambda: np.array([1.0, 0.0, 0.0], dtype=np.float64))
+    y_vec: np.ndarray = field(default_factory=lambda: np.array([0.0, 1.0, 0.0], dtype=np.float64))
+    z_vec: np.ndarray = field(default_factory=lambda: np.array([0.0, 0.0, 1.0], dtype=np.float64))
 
     # Collection params
     avg_secs: float = 0.25
@@ -212,42 +213,42 @@ class CalibConfig:
 def build_steps(cfg: CalibConfig):
     # 6 direction steps in robot base frame
     return [
-        ("+X (Right)",  cfg.right_vec),
-        ("-X (Left)",  -cfg.right_vec),
-        ("+Y (Forward)", cfg.forward_vec),
-        ("-Y (Backward)", -cfg.forward_vec),
-        ("+Z (Up)",     cfg.up_vec),
-        ("-Z (Down)",  -cfg.up_vec),
+        ("+X (Forward)",  cfg.x_vec),
+        ("-X (Backward)", -cfg.x_vec),
+        ("+Y (Left)", cfg.y_vec),
+        ("-Y (Right)", -cfg.y_vec),
+        ("+Z (Up)",     cfg.z_vec),
+        ("-Z (Down)",  -cfg.z_vec),
     ]
 
 
 def validate_and_orthonormalize_axes(cfg: CalibConfig) -> CalibConfig:
-    right = normalize(np.array(cfg.right_vec, dtype=np.float64))
-    forward_raw = normalize(np.array(cfg.forward_vec, dtype=np.float64))
-    up_hint = normalize(np.array(cfg.up_vec, dtype=np.float64))
+    x_axis = normalize(np.array(cfg.x_vec, dtype=np.float64))
+    y_axis_raw = normalize(np.array(cfg.y_vec, dtype=np.float64))
+    z_hint = normalize(np.array(cfg.z_vec, dtype=np.float64))
 
-    if np.linalg.norm(right) < 1e-9 or np.linalg.norm(forward_raw) < 1e-9 or np.linalg.norm(up_hint) < 1e-9:
+    if np.linalg.norm(x_axis) < 1e-9 or np.linalg.norm(y_axis_raw) < 1e-9 or np.linalg.norm(z_hint) < 1e-9:
         raise ValueError("Axis vectors must be non-zero.")
 
-    # Gram-Schmidt on forward against right, then build right-handed up.
-    forward = forward_raw - np.dot(forward_raw, right) * right
-    forward = normalize(forward)
-    if np.linalg.norm(forward) < 1e-9:
-        raise ValueError("`right` and `forward` are colinear; cannot build a valid basis.")
+    # Gram-Schmidt on y against x, then build right-handed z from x x y.
+    y_axis = y_axis_raw - np.dot(y_axis_raw, x_axis) * x_axis
+    y_axis = normalize(y_axis)
+    if np.linalg.norm(y_axis) < 1e-9:
+        raise ValueError("`x_axis` and `y_axis` are colinear; cannot build a valid basis.")
 
-    up = normalize(np.cross(right, forward))
-    if np.linalg.norm(up) < 1e-9:
-        raise ValueError("Failed to derive `up` from `right x forward`.")
+    z_axis = normalize(np.cross(x_axis, y_axis))
+    if np.linalg.norm(z_axis) < 1e-9:
+        raise ValueError("Failed to derive `z_axis` from `x_axis x y_axis`.")
 
-    # Keep up direction close to user input when possible.
-    if np.dot(up, up_hint) < 0:
-        up *= -1.0
-        forward *= -1.0
+    # Keep z direction close to user input when possible.
+    if np.dot(z_axis, z_hint) < 0:
+        z_axis *= -1.0
+        y_axis *= -1.0
 
     return CalibConfig(
-        right_vec=right,
-        forward_vec=forward,
-        up_vec=up,
+        x_vec=x_axis,
+        y_vec=y_axis,
+        z_vec=z_axis,
         avg_secs=cfg.avg_secs,
         min_move_m=cfg.min_move_m,
         desired_robot_move_m=cfg.desired_robot_move_m,
@@ -310,9 +311,9 @@ def calibrate_R_s(tracker: PikaAdapter, out_path: str, cfg: CalibConfig):
         "R_map_rowmajor_3x3": R_map.reshape(-1).tolist(),
         "s": s,
         "robot_base_convention": {
-            "right": cfg.right_vec.tolist(),
-            "forward": cfg.forward_vec.tolist(),
-            "up": cfg.up_vec.tolist(),
+            "x_plus_forward": cfg.x_vec.tolist(),
+            "y_plus_left": cfg.y_vec.tolist(),
+            "z_plus_up": cfg.z_vec.tolist(),
         },
         "collection": {
             "avg_secs": cfg.avg_secs,
@@ -355,16 +356,16 @@ def main():
     ap.add_argument("--desired_robot_move_m", type=float, default=0.05)
 
     # Robot base axis convention override (optional)
-    ap.add_argument("--right", nargs=3, type=float, default=[1,0,0], help="Robot base RIGHT unit vector (default +X)")
-    ap.add_argument("--forward", nargs=3, type=float, default=[0,1,0], help="Robot base FORWARD unit vector (default +Y)")
-    ap.add_argument("--up", nargs=3, type=float, default=[0,0,1], help="Robot base UP unit vector (default +Z)")
+    ap.add_argument("--x_axis", nargs=3, type=float, default=[1,0,0], help="Robot base +X unit vector (default forward)")
+    ap.add_argument("--y_axis", nargs=3, type=float, default=[0,1,0], help="Robot base +Y unit vector (default left)")
+    ap.add_argument("--z_axis", nargs=3, type=float, default=[0,0,1], help="Robot base +Z unit vector (default up)")
 
     args = ap.parse_args()
 
     cfg = CalibConfig(
-        right_vec=np.array(args.right, dtype=np.float64),
-        forward_vec=np.array(args.forward, dtype=np.float64),
-        up_vec=np.array(args.up, dtype=np.float64),
+        x_vec=np.array(args.x_axis, dtype=np.float64),
+        y_vec=np.array(args.y_axis, dtype=np.float64),
+        z_vec=np.array(args.z_axis, dtype=np.float64),
         avg_secs=args.avg_secs,
         min_move_m=args.min_move_m,
         desired_robot_move_m=args.desired_robot_move_m,
