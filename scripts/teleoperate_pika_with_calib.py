@@ -303,6 +303,23 @@ def main() -> None:
         help="Clip rotational increment per cycle after mapping (degrees)",
     )
     parser.add_argument(
+        "--rot-ema-alpha",
+        type=float,
+        default=0.25,
+        help="EMA alpha for mapped rotational increment smoothing in (0, 1]",
+    )
+    parser.add_argument(
+        "--rot-jitter-deadband-deg",
+        type=float,
+        default=0.12,
+        help="Set small mapped rotational increment norms below this threshold to zero (degrees)",
+    )
+    parser.add_argument(
+        "--disable-rot-jitter-filter",
+        action="store_true",
+        help="Disable rotational EMA+deadband jitter filter",
+    )
+    parser.add_argument(
         "--pika-axis-order",
         type=str,
         default="xyz",
@@ -357,6 +374,10 @@ def main() -> None:
         raise ValueError("max step values must be > 0")
     if args.max_rot_step_deg <= 0:
         raise ValueError("max-rot-step-deg must be > 0")
+    if not (0 < args.rot_ema_alpha <= 1.0):
+        raise ValueError("rot-ema-alpha must be in (0, 1]")
+    if args.rot_jitter_deadband_deg < 0:
+        raise ValueError("rot-jitter-deadband-deg must be >= 0")
     if not (0 < args.dp_ema_alpha <= 1.0):
         raise ValueError("dp-ema-alpha must be in (0, 1]")
     if args.jitter_deadband_m < 0:
@@ -444,7 +465,15 @@ def main() -> None:
                 f"dp_ema_alpha={args.dp_ema_alpha:.2f}, "
                 f"jitter_deadband_m={args.jitter_deadband_m:.4f}"
             )
-        print(f"[rot] max_rot_step_deg={args.max_rot_step_deg:.2f}")
+        if args.disable_rot_jitter_filter:
+            print(f"[rot] max_rot_step_deg={args.max_rot_step_deg:.2f}, jitter filter disabled")
+        else:
+            print(
+                "[rot] "
+                f"max_rot_step_deg={args.max_rot_step_deg:.2f}, "
+                f"rot_ema_alpha={args.rot_ema_alpha:.2f}, "
+                f"rot_jitter_deadband_deg={args.rot_jitter_deadband_deg:.3f}"
+            )
         print(
             "[seed] "
             f"target=({target_x:.4f}, {target_y:.4f}, {target_z:.4f}) m, "
@@ -454,6 +483,7 @@ def main() -> None:
         last_log = time.time()
         count = 0
         dp_ema = np.zeros(3, dtype=np.float64)
+        d_rotvec_ema = np.zeros(3, dtype=np.float64)
         while True:
             p_cur, q_cur = tracker.get_pose()
             dp_pika = p_cur - p_prev
@@ -466,6 +496,14 @@ def main() -> None:
             q_delta = normalize_quat_xyzw(q_delta)
             d_rotvec_pika = quat_to_rotvec_xyzw(q_delta)
             d_rotvec_base = R_map @ d_rotvec_pika
+            if not args.disable_rot_jitter_filter:
+                d_rotvec_ema = (
+                    args.rot_ema_alpha * d_rotvec_base
+                    + (1.0 - args.rot_ema_alpha) * d_rotvec_ema
+                )
+                d_rotvec_base = d_rotvec_ema
+                if float(np.linalg.norm(d_rotvec_base)) < math.radians(args.rot_jitter_deadband_deg):
+                    d_rotvec_base = np.zeros(3, dtype=np.float64)
             d_rotvec_base = clamp_vec(d_rotvec_base, math.radians(args.max_rot_step_deg))
             q_delta_base = rotvec_to_quat_xyzw(d_rotvec_base)
             q_target = normalize_quat_xyzw(quat_mul_xyzw(q_delta_base, q_target))
