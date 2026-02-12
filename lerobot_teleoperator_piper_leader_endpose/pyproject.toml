@@ -1,0 +1,17 @@
+[project]
+name = "lerobot_teleoperator_piper_leader_endpose"
+version = "0.1.0"
+description = "LeRobot Teleoperator plugin for AgileX PiPER leader arm with EndPose output"
+readme = "README.md"
+authors = [
+    { name = "richardSHkim", email = "shkim@superb-ai.com" }
+]
+requires-python = ">=3.10"
+dependencies = ["lerobot==0.4.3", "piper_sdk==0.6.1"]
+
+[project.scripts]
+lerobot-teleoperator-piper-leader-endpose = "lerobot_teleoperator_piper_leader_endpose:main"
+
+[build-system]
+requires = ["uv_build>=0.9.9,<0.10.0"]
+build-backend = "uv_build"
