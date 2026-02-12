@@ -13,5 +13,6 @@ class PiperLeaderEndPoseConfig(TeleoperatorConfig):
     can_name: str = "can_leader"
     judge_flag: bool = False
     source_mode: str = "feedback"  # "feedback" | "control" (gripper source only)
+    pose_source: str = "joint_fk"  # "joint_fk" | "endpose_feedback"
     hand_guiding: bool = True
     gripper_opening_m: float = 0.07

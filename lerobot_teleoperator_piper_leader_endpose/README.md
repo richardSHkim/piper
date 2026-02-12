@@ -16,6 +16,11 @@ This schema is directly compatible with `lerobot_robot_piper_follower_endpose`.
 teleop:
   type: piper_leader_endpose
   can_name: can_leader
+  pose_source: joint_fk
   id: piper_leader_endpose_01
   hand_guiding: true
 ```
+
+`pose_source` options:
+- `joint_fk` (default): read leader joint feedback and compute end pose via FK. Recommended when hand-guiding.
+- `endpose_feedback`: use `GetArmEndPoseMsgs()` directly.
