@@ -41,13 +41,22 @@ class PikaAdapter:
       pos: np.ndarray shape (3,), in meters, world(base_link) frame
       quat: np.ndarray shape (4,), quaternion (unused in this calibration, but kept for consistency)
     """
-    def __init__(self, device_key: str = "WM0", port: str = "/dev/ttyUSB0", pos_unit: str = "m"):
+    def __init__(
+        self,
+        device_key: str = "WM0",
+        port: str = "/dev/ttyUSB0",
+        pos_unit: str = "m",
+        startup_timeout_s: float = 5.0,
+        poll_hz: float = 60.0,
+    ):
         self.device_key = device_key
         self.port = port
         self.pos_scale = 1.0 if pos_unit == "m" else 0.001
+        self.poll_dt = 1.0 / max(1.0, float(poll_hz))
         self._sense = None
         self.dev = None
         self._connect()
+        self._wait_for_first_pose(timeout_s=startup_timeout_s)
 
     def _connect(self) -> None:
         try:
@@ -73,6 +82,26 @@ class PikaAdapter:
             pass
         self.dev = None
 
+    def _get_raw_pose(self):
+        if self.dev is None:
+            return None
+        pose_obj = self.dev.get_pose(self.device_key)
+        if pose_obj is None:
+            all_poses = self.dev.get_pose()
+            if isinstance(all_poses, dict):
+                pose_obj = all_poses.get(self.device_key)
+        return pose_obj
+
+    def _wait_for_first_pose(self, timeout_s: float) -> None:
+        deadline = time.time() + max(0.1, timeout_s)
+        while time.time() < deadline:
+            if self._get_raw_pose() is not None:
+                return
+            time.sleep(self.poll_dt)
+        raise RuntimeError(
+            f"Timed out waiting for first pose (device_key={self.device_key}, timeout={timeout_s:.1f}s)"
+        )
+
     def get_pose(self) -> Tuple[np.ndarray, np.ndarray]:
         """
         Return (pos_m, quat_xyzw)
@@ -82,11 +111,13 @@ class PikaAdapter:
         if self.dev is None:
             raise RuntimeError("PIKA device is not connected.")
 
-        pose_obj = self.dev.get_pose(self.device_key)
+        pose_obj = self._get_raw_pose()
         if pose_obj is None:
-            all_poses = self.dev.get_pose()
-            if isinstance(all_poses, dict):
-                pose_obj = all_poses.get(self.device_key)
+            # Short retry window to absorb occasional tracker latency/drop.
+            deadline = time.time() + 1.0
+            while time.time() < deadline and pose_obj is None:
+                time.sleep(self.poll_dt)
+                pose_obj = self._get_raw_pose()
 
         if pose_obj is None:
             raise RuntimeError(f"No pose available for device_key={self.device_key}")
@@ -301,6 +332,8 @@ def main():
         default="m",
         help="Position unit returned by SDK get_pose(): m or mm",
     )
+    ap.add_argument("--startup_timeout_s", type=float, default=5.0, help="Wait timeout for first pose after connect")
+    ap.add_argument("--pose_poll_hz", type=float, default=60.0, help="Polling frequency while waiting for pose")
     ap.add_argument("--out", type=str, default="calib.json")
     ap.add_argument("--avg_secs", type=float, default=0.25)
     ap.add_argument("--min_move_m", type=float, default=0.02)
@@ -323,7 +356,13 @@ def main():
     )
     cfg = validate_and_orthonormalize_axes(cfg)
 
-    tracker = PikaAdapter(device_key=args.device_key, port=args.port, pos_unit=args.pos_unit)
+    tracker = PikaAdapter(
+        device_key=args.device_key,
+        port=args.port,
+        pos_unit=args.pos_unit,
+        startup_timeout_s=args.startup_timeout_s,
+        poll_hz=args.pose_poll_hz,
+    )
     try:
         calibrate_R_s(tracker, args.out, cfg)
     finally:
