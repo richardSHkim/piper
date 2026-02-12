@@ -395,7 +395,8 @@ def main() -> None:
                 hz = count / max(now - last_log, 1e-6)
                 print(
                     f"[run] loop_hz={hz:.1f}, "
-                    f"target=({target_x:.3f}, {target_y:.3f}, {target_z:.3f})"
+                    f"target=({target_x:.3f}, {target_y:.3f}, {target_z:.3f}), "
+                    f"rpy=({target_roll:.3f}, {target_pitch:.3f}, {target_yaw:.3f})"
                 )
                 last_log = now
                 count = 0
