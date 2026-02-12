@@ -17,6 +17,7 @@ This script performs incremental cartesian teleop:
 import argparse
 import json
 import math
+import sys
 import time
 from pathlib import Path
 
@@ -24,6 +25,10 @@ import numpy as np
 from piper_sdk import C_PiperInterface_V2
 
 from calibration import PikaAdapter
+try:
+    import termios
+except Exception:
+    termios = None
 
 M_TO_001MM = 1_000_000.0
 _001MM_TO_M = 1.0 / 1_000_000.0
@@ -42,11 +47,17 @@ def wait_enable(arm: C_PiperInterface_V2, timeout_s: float) -> None:
     raise RuntimeError(f"PiPER enable timeout after {timeout_s:.1f}s")
 
 
-def move_piper_to_zero(arm: C_PiperInterface_V2, speed_ratio: int, gripper_effort: int = 1000) -> None:
-    # Follow SDK demo sequence: joint mode -> zero joints -> gripper open(0).
+def move_piper_to_zero_and_open_gripper(
+    arm: C_PiperInterface_V2,
+    speed_ratio: int,
+    gripper_effort: int,
+    piper_gripper_opening_m: float,
+) -> None:
+    # Follow SDK demo sequence: joint mode -> zero joints -> gripper fully open.
     arm.ModeCtrl(0x01, 0x01, int(speed_ratio), 0x00)
     arm.JointCtrl(0, 0, 0, 0, 0, 0)
-    arm.GripperCtrl(0, int(gripper_effort), 0x01, 0x00)
+    open_stroke_001mm = int(round(float(piper_gripper_opening_m) * M_TO_001MM))
+    arm.GripperCtrl(abs(open_stroke_001mm), int(gripper_effort), 0x01, 0x00)
 
 
 def load_calib(path: str) -> tuple[np.ndarray, float]:
@@ -84,6 +95,59 @@ def clamp_scalar(x: float, lo: float, hi: float) -> float:
     return min(max(x, lo), hi)
 
 
+def flush_stdin_buffer() -> None:
+    # Drop any Enter presses made before readiness to prevent accidental start.
+    if termios is None or (not sys.stdin.isatty()):
+        return
+    try:
+        termios.tcflush(sys.stdin, termios.TCIFLUSH)
+    except Exception:
+        pass
+
+
+def wait_pika_pose_stable(
+    tracker: PikaAdapter,
+    stable_secs: float,
+    poll_hz: float,
+    max_step_m: float,
+    timeout_s: float,
+) -> np.ndarray:
+    dt = 1.0 / max(1.0, float(poll_hz))
+    need_count = max(1, int(stable_secs * poll_hz))
+    deadline = time.time() + timeout_s
+    last_log = time.time()
+
+    p_prev, _ = tracker.get_pose()
+    stable_count = 0
+    latest_step = 0.0
+    while time.time() < deadline:
+        time.sleep(dt)
+        p_cur, _ = tracker.get_pose()
+        latest_step = float(np.linalg.norm(p_cur - p_prev))
+        p_prev = p_cur
+
+        if latest_step <= max_step_m:
+            stable_count += 1
+        else:
+            stable_count = 0
+
+        if stable_count >= need_count:
+            return p_cur
+
+        now = time.time()
+        if now - last_log >= 0.5:
+            print(
+                f"[ready-check] waiting pika stable... step={latest_step:.5f}m, "
+                f"stable={(stable_count / max(need_count, 1)) * 100.0:.0f}%"
+            )
+            last_log = now
+
+    raise RuntimeError(
+        f"PIKA pose did not become stable within {timeout_s:.1f}s "
+        f"(last step={latest_step:.5f}m, threshold={max_step_m:.5f}m)"
+    )
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(
         description="Teleoperate PiPER with PIKA pose increments using calibration json."
@@ -101,6 +165,14 @@ def main() -> None:
     parser.add_argument("--pika-pos-unit", choices=["m", "mm"], default="m")
     parser.add_argument("--pika-startup-timeout-s", type=float, default=5.0)
     parser.add_argument("--pika-poll-hz", type=float, default=120.0)
+    parser.add_argument("--ready-timeout-s", type=float, default=20.0, help="Timeout for readiness checks")
+    parser.add_argument("--ready-stable-secs", type=float, default=1.0, help="Required continuous stable duration")
+    parser.add_argument(
+        "--ready-max-step-m",
+        type=float,
+        default=0.0015,
+        help="Max per-sample PIKA motion to consider stable",
+    )
 
     parser.add_argument("--max-pika-step-m", type=float, default=0.05, help="Reject/clip sudden tracker jumps")
     parser.add_argument("--max-base-step-m", type=float, default=0.03, help="Clip cartesian increment per cycle")
@@ -136,6 +208,12 @@ def main() -> None:
         raise ValueError("piper-gripper-opening-m must be > 0")
     if args.pika_gripper_max_mm <= args.pika_gripper_min_mm:
         raise ValueError("pika-gripper-max-mm must be greater than pika-gripper-min-mm")
+    if args.ready_timeout_s <= 0:
+        raise ValueError("ready-timeout-s must be > 0")
+    if args.ready_stable_secs <= 0:
+        raise ValueError("ready-stable-secs must be > 0")
+    if args.ready_max_step_m <= 0:
+        raise ValueError("ready-max-step-m must be > 0")
 
     R_map, s = load_calib(args.calib)
 
@@ -145,8 +223,16 @@ def main() -> None:
         arm.ConnectPort()
         time.sleep(0.2)
         wait_enable(arm, timeout_s=args.enable_timeout)
-        print(f"[init] moving piper to joint zero (speed_ratio={ZERO_SPEED_RATIO_DEFAULT})")
-        move_piper_to_zero(arm, speed_ratio=ZERO_SPEED_RATIO_DEFAULT)
+        print(
+            f"[init] moving piper to joint zero + gripper open "
+            f"(speed_ratio={ZERO_SPEED_RATIO_DEFAULT})"
+        )
+        move_piper_to_zero_and_open_gripper(
+            arm,
+            speed_ratio=ZERO_SPEED_RATIO_DEFAULT,
+            gripper_effort=args.gripper_effort,
+            piper_gripper_opening_m=args.piper_gripper_opening_m,
+        )
         if ZERO_SETTLE_S_DEFAULT > 0:
             time.sleep(ZERO_SETTLE_S_DEFAULT)
 
@@ -161,8 +247,22 @@ def main() -> None:
             poll_hz=args.pika_poll_hz,
         )
 
+        print("[ready-check] waiting for stable PIKA pose...")
+        p_prev = wait_pika_pose_stable(
+            tracker=tracker,
+            stable_secs=args.ready_stable_secs,
+            poll_hz=args.pika_poll_hz,
+            max_step_m=args.ready_max_step_m,
+            timeout_s=args.ready_timeout_s,
+        )
+
         target_x, target_y, target_z, target_roll, target_pitch, target_yaw = read_endpose_m_rad(arm)
-        p_prev, _ = tracker.get_pose()
+        print(
+            "[ready] piper initialized (zero + gripper open), pika pose stable. "
+            "Press Enter to start teleop."
+        )
+        flush_stdin_buffer()
+        input()
 
         print(
             "[start] "
