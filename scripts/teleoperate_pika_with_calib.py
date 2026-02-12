@@ -286,8 +286,6 @@ def main() -> None:
 
         last_log = time.time()
         count = 0
-        gripper_mm = None
-        gripper_ratio = 0.0
         while True:
             p_cur, _ = tracker.get_pose()
             dp_pika = p_cur - p_prev
@@ -330,21 +328,9 @@ def main() -> None:
             now = time.time()
             if now - last_log >= 1.0:
                 hz = count / max(now - last_log, 1e-6)
-                grip_log = (
-                    "grip=disabled"
-                    if args.disable_gripper_sync
-                    else (
-                        "grip=unavailable"
-                        if gripper_mm is None
-                        else f"grip_mm={gripper_mm:.1f}, grip_ratio={gripper_ratio:.2f}"
-                    )
-                )
                 print(
                     f"[run] loop_hz={hz:.1f}, "
-                    f"dp_pika={np.linalg.norm(dp_pika):.4f}m, "
-                    f"dp_base={np.linalg.norm(dp_base):.4f}m, "
-                    f"target=({target_x:.3f}, {target_y:.3f}, {target_z:.3f}), "
-                    f"{grip_log}"
+                    f"target=({target_x:.3f}, {target_y:.3f}, {target_z:.3f})"
                 )
                 last_log = now
                 count = 0
