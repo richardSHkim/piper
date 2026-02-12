@@ -104,6 +104,51 @@ def clamp_scalar(x: float, lo: float, hi: float) -> float:
     return min(max(x, lo), hi)
 
 
+def wrap_to_pi(angle_rad: float) -> float:
+    return (angle_rad + math.pi) % (2.0 * math.pi) - math.pi
+
+
+def normalize_quat_xyzw(q: np.ndarray) -> np.ndarray:
+    q = np.asarray(q, dtype=np.float64)
+    n = float(np.linalg.norm(q))
+    if n <= 1e-12:
+        return np.array([0.0, 0.0, 0.0, 1.0], dtype=np.float64)
+    return q / n
+
+
+def quat_conjugate_xyzw(q: np.ndarray) -> np.ndarray:
+    return np.array([-q[0], -q[1], -q[2], q[3]], dtype=np.float64)
+
+
+def quat_mul_xyzw(a: np.ndarray, b: np.ndarray) -> np.ndarray:
+    ax, ay, az, aw = a
+    bx, by, bz, bw = b
+    return np.array([
+        aw * bx + ax * bw + ay * bz - az * by,
+        aw * by - ax * bz + ay * bw + az * bx,
+        aw * bz + ax * by - ay * bx + az * bw,
+        aw * bw - ax * bx - ay * by - az * bz,
+    ], dtype=np.float64)
+
+
+def quat_to_rpy_xyzw(q: np.ndarray) -> tuple[float, float, float]:
+    x, y, z, w = q
+    sinr_cosp = 2.0 * (w * x + y * z)
+    cosr_cosp = 1.0 - 2.0 * (x * x + y * y)
+    roll = math.atan2(sinr_cosp, cosr_cosp)
+
+    sinp = 2.0 * (w * y - z * x)
+    if abs(sinp) >= 1.0:
+        pitch = math.copysign(math.pi / 2.0, sinp)
+    else:
+        pitch = math.asin(sinp)
+
+    siny_cosp = 2.0 * (w * z + x * y)
+    cosy_cosp = 1.0 - 2.0 * (y * y + z * z)
+    yaw = math.atan2(siny_cosp, cosy_cosp)
+    return roll, pitch, yaw
+
+
 def parse_axis_order(axis_order: str) -> tuple[int, int, int]:
     token = axis_order.strip().lower()
     if len(token) != 3 or set(token) != {"x", "y", "z"}:
@@ -135,20 +180,21 @@ def wait_pika_pose_stable(
     poll_hz: float,
     max_step_m: float,
     timeout_s: float,
-) -> np.ndarray:
+) -> tuple[np.ndarray, np.ndarray]:
     dt = 1.0 / max(1.0, float(poll_hz))
     need_count = max(1, int(stable_secs * poll_hz))
     deadline = time.time() + timeout_s
     last_log = time.time()
 
-    p_prev, _ = tracker.get_pose()
+    p_prev, q_prev = tracker.get_pose()
     stable_count = 0
     latest_step = 0.0
     while time.time() < deadline:
         time.sleep(dt)
-        p_cur, _ = tracker.get_pose()
+        p_cur, q_cur = tracker.get_pose()
         latest_step = float(np.linalg.norm(p_cur - p_prev))
         p_prev = p_cur
+        q_prev = q_cur
 
         if latest_step <= max_step_m:
             stable_count += 1
@@ -156,7 +202,7 @@ def wait_pika_pose_stable(
             stable_count = 0
 
         if stable_count >= need_count:
-            return p_cur
+            return p_cur, q_prev
 
         now = time.time()
         if now - last_log >= 0.5:
@@ -311,13 +357,14 @@ def main() -> None:
         )
 
         print("[ready-check] waiting for stable PIKA pose...")
-        p_prev = wait_pika_pose_stable(
+        p_prev, q_prev = wait_pika_pose_stable(
             tracker=tracker,
             stable_secs=args.ready_stable_secs,
             poll_hz=args.pika_poll_hz,
             max_step_m=args.ready_max_step_m,
             timeout_s=args.ready_timeout_s,
         )
+        q_prev = normalize_quat_xyzw(q_prev)
 
         target_x, target_y, target_z, target_roll, target_pitch, target_yaw = END_POSE_INIT_M_RAD
         print(
@@ -354,10 +401,19 @@ def main() -> None:
         count = 0
         dp_ema = np.zeros(3, dtype=np.float64)
         while True:
-            p_cur, _ = tracker.get_pose()
+            p_cur, q_cur = tracker.get_pose()
             dp_pika = p_cur - p_prev
             p_prev = p_cur
             dp_pika = dp_pika[list(pika_axis_idx)] * pika_axis_sign
+            q_cur = normalize_quat_xyzw(q_cur)
+            if float(np.dot(q_prev, q_cur)) < 0.0:
+                q_cur = -q_cur
+            q_delta = quat_mul_xyzw(q_cur, quat_conjugate_xyzw(q_prev))
+            q_delta = normalize_quat_xyzw(q_delta)
+            d_roll, d_pitch, d_yaw = quat_to_rpy_xyzw(q_delta)
+            d_rpy_pika = np.array([d_roll, d_pitch, d_yaw], dtype=np.float64)
+            d_rpy_base = R_map @ d_rpy_pika
+            q_prev = q_cur
 
             dp_pika = clamp_vec(dp_pika, args.max_pika_step_m)
             if not args.disable_jitter_filter:
@@ -371,6 +427,9 @@ def main() -> None:
             target_x += float(dp_base[0])
             target_y += float(dp_base[1])
             target_z += float(dp_base[2])
+            target_roll = wrap_to_pi(target_roll + float(d_rpy_base[0]))
+            target_pitch = wrap_to_pi(target_pitch + float(d_rpy_base[1]))
+            target_yaw = wrap_to_pi(target_yaw + float(d_rpy_base[2]))
 
             if args.workspace is not None:
                 x_min, x_max, y_min, y_max, z_min, z_max = args.workspace
