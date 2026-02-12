@@ -183,6 +183,19 @@ def main() -> None:
 
     parser.add_argument("--max-pika-step-m", type=float, default=0.05, help="Reject/clip sudden tracker jumps")
     parser.add_argument("--max-base-step-m", type=float, default=0.03, help="Clip cartesian increment per cycle")
+    parser.add_argument(
+        "--dp-ema-alpha",
+        type=float,
+        default=0.35,
+        help="EMA alpha for dp_pika smoothing in (0, 1]; lower = smoother",
+    )
+    parser.add_argument(
+        "--jitter-deadband-m",
+        type=float,
+        default=0.0008,
+        help="Set small dp_pika norms below this threshold to zero",
+    )
+    parser.add_argument("--disable-jitter-filter", action="store_true", help="Disable EMA+deadband jitter filter")
     parser.add_argument("--gripper-effort", type=int, default=1000, help="PiPER gripper effort [0..5000]")
     parser.add_argument(
         "--piper-gripper-opening-m",
@@ -211,6 +224,10 @@ def main() -> None:
         raise ValueError("translation-gain must be > 0")
     if args.max_pika_step_m <= 0 or args.max_base_step_m <= 0:
         raise ValueError("max step values must be > 0")
+    if not (0 < args.dp_ema_alpha <= 1.0):
+        raise ValueError("dp-ema-alpha must be in (0, 1]")
+    if args.jitter_deadband_m < 0:
+        raise ValueError("jitter-deadband-m must be >= 0")
     if not (0 <= args.gripper_effort <= 5000):
         raise ValueError("gripper-effort must be in [0, 5000]")
     if args.piper_gripper_opening_m <= 0:
@@ -278,6 +295,14 @@ def main() -> None:
             f"can={args.can}, pika={args.pika_device_key}@{args.pika_port}, "
             f"s={s:.6f}, gain={args.translation_gain:.2f}, period={args.period:.3f}s"
         )
+        if args.disable_jitter_filter:
+            print("[filter] jitter filter disabled")
+        else:
+            print(
+                "[filter] "
+                f"dp_ema_alpha={args.dp_ema_alpha:.2f}, "
+                f"jitter_deadband_m={args.jitter_deadband_m:.4f}"
+            )
         print(
             "[seed] "
             f"target=({target_x:.4f}, {target_y:.4f}, {target_z:.4f}) m, "
@@ -286,12 +311,18 @@ def main() -> None:
 
         last_log = time.time()
         count = 0
+        dp_ema = np.zeros(3, dtype=np.float64)
         while True:
             p_cur, _ = tracker.get_pose()
             dp_pika = p_cur - p_prev
             p_prev = p_cur
 
             dp_pika = clamp_vec(dp_pika, args.max_pika_step_m)
+            if not args.disable_jitter_filter:
+                dp_ema = (args.dp_ema_alpha * dp_pika) + ((1.0 - args.dp_ema_alpha) * dp_ema)
+                dp_pika = dp_ema
+                if float(np.linalg.norm(dp_pika)) < args.jitter_deadband_m:
+                    dp_pika = np.zeros(3, dtype=np.float64)
             dp_base = (s * args.translation_gain) * (R_map @ dp_pika)
             dp_base = clamp_vec(dp_base, args.max_base_step_m)
 
