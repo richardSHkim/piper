@@ -96,6 +96,21 @@ def clamp_scalar(x: float, lo: float, hi: float) -> float:
     return min(max(x, lo), hi)
 
 
+def parse_axis_order(axis_order: str) -> tuple[int, int, int]:
+    token = axis_order.strip().lower()
+    if len(token) != 3 or set(token) != {"x", "y", "z"}:
+        raise ValueError("pika-axis-order must be a permutation of xyz (e.g. xyz, xzy, yxz)")
+    idx = {"x": 0, "y": 1, "z": 2}
+    return (idx[token[0]], idx[token[1]], idx[token[2]])
+
+
+def parse_axis_sign(axis_sign: str) -> np.ndarray:
+    token = axis_sign.strip()
+    if len(token) != 3 or any(c not in "+-" for c in token):
+        raise ValueError("pika-axis-sign must be 3 chars using +/- (e.g. +++, +-+, --+)")
+    return np.array([1.0 if c == "+" else -1.0 for c in token], dtype=np.float64)
+
+
 def flush_stdin_buffer() -> None:
     # Drop any Enter presses made before readiness to prevent accidental start.
     if termios is None or (not sys.stdin.isatty()):
@@ -184,6 +199,18 @@ def main() -> None:
     parser.add_argument("--max-pika-step-m", type=float, default=0.05, help="Reject/clip sudden tracker jumps")
     parser.add_argument("--max-base-step-m", type=float, default=0.03, help="Clip cartesian increment per cycle")
     parser.add_argument(
+        "--pika-axis-order",
+        type=str,
+        default="xyz",
+        help="Axis order remap for raw PIKA delta before calibration (permutation of xyz)",
+    )
+    parser.add_argument(
+        "--pika-axis-sign",
+        type=str,
+        default="+++",
+        help="Axis sign remap for raw PIKA delta before calibration (3 chars of +/-)",
+    )
+    parser.add_argument(
         "--dp-ema-alpha",
         type=float,
         default=0.35,
@@ -241,6 +268,8 @@ def main() -> None:
     if args.ready_max_step_m <= 0:
         raise ValueError("ready-max-step-m must be > 0")
 
+    pika_axis_idx = parse_axis_order(args.pika_axis_order)
+    pika_axis_sign = parse_axis_sign(args.pika_axis_sign)
     R_map, s = load_calib(args.calib)
 
     arm = C_PiperInterface_V2(args.can)
@@ -295,6 +324,10 @@ def main() -> None:
             f"can={args.can}, pika={args.pika_device_key}@{args.pika_port}, "
             f"s={s:.6f}, gain={args.translation_gain:.2f}, period={args.period:.3f}s"
         )
+        print(
+            "[map] "
+            f"pika_axis_order={args.pika_axis_order}, pika_axis_sign={args.pika_axis_sign}"
+        )
         if args.disable_jitter_filter:
             print("[filter] jitter filter disabled")
         else:
@@ -316,6 +349,7 @@ def main() -> None:
             p_cur, _ = tracker.get_pose()
             dp_pika = p_cur - p_prev
             p_prev = p_cur
+            dp_pika = dp_pika[list(pika_axis_idx)] * pika_axis_sign
 
             dp_pika = clamp_vec(dp_pika, args.max_pika_step_m)
             if not args.disable_jitter_filter:
