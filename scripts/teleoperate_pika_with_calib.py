@@ -104,10 +104,6 @@ def clamp_scalar(x: float, lo: float, hi: float) -> float:
     return min(max(x, lo), hi)
 
 
-def wrap_to_pi(angle_rad: float) -> float:
-    return (angle_rad + math.pi) % (2.0 * math.pi) - math.pi
-
-
 def normalize_quat_xyzw(q: np.ndarray) -> np.ndarray:
     q = np.asarray(q, dtype=np.float64)
     n = float(np.linalg.norm(q))
@@ -147,6 +143,54 @@ def quat_to_rpy_xyzw(q: np.ndarray) -> tuple[float, float, float]:
     cosy_cosp = 1.0 - 2.0 * (y * y + z * z)
     yaw = math.atan2(siny_cosp, cosy_cosp)
     return roll, pitch, yaw
+
+
+def rpy_to_quat_xyzw(roll: float, pitch: float, yaw: float) -> np.ndarray:
+    cr = math.cos(roll * 0.5)
+    sr = math.sin(roll * 0.5)
+    cp = math.cos(pitch * 0.5)
+    sp = math.sin(pitch * 0.5)
+    cy = math.cos(yaw * 0.5)
+    sy = math.sin(yaw * 0.5)
+    return normalize_quat_xyzw(np.array([
+        sr * cp * cy - cr * sp * sy,
+        cr * sp * cy + sr * cp * sy,
+        cr * cp * sy - sr * sp * cy,
+        cr * cp * cy + sr * sp * sy,
+    ], dtype=np.float64))
+
+
+def quat_to_rotvec_xyzw(q: np.ndarray) -> np.ndarray:
+    q = normalize_quat_xyzw(q)
+    if q[3] < 0.0:
+        q = -q
+    v = q[:3]
+    v_norm = float(np.linalg.norm(v))
+    if v_norm < 1e-12:
+        return 2.0 * v
+    angle = 2.0 * math.atan2(v_norm, q[3])
+    return (angle / v_norm) * v
+
+
+def rotvec_to_quat_xyzw(rotvec: np.ndarray) -> np.ndarray:
+    rotvec = np.asarray(rotvec, dtype=np.float64)
+    theta = float(np.linalg.norm(rotvec))
+    if theta < 1e-12:
+        return normalize_quat_xyzw(np.array([
+            0.5 * rotvec[0],
+            0.5 * rotvec[1],
+            0.5 * rotvec[2],
+            1.0,
+        ], dtype=np.float64))
+    axis = rotvec / theta
+    half = 0.5 * theta
+    s = math.sin(half)
+    return normalize_quat_xyzw(np.array([
+        axis[0] * s,
+        axis[1] * s,
+        axis[2] * s,
+        math.cos(half),
+    ], dtype=np.float64))
 
 
 def parse_axis_order(axis_order: str) -> tuple[int, int, int]:
@@ -367,6 +411,7 @@ def main() -> None:
         q_prev = normalize_quat_xyzw(q_prev)
 
         target_x, target_y, target_z, target_roll, target_pitch, target_yaw = END_POSE_INIT_M_RAD
+        q_target = rpy_to_quat_xyzw(target_roll, target_pitch, target_yaw)
         print(
             "[ready] piper initialized (zero + gripper open), pika pose stable. "
             "Press Enter to start teleop."
@@ -410,9 +455,11 @@ def main() -> None:
                 q_cur = -q_cur
             q_delta = quat_mul_xyzw(q_cur, quat_conjugate_xyzw(q_prev))
             q_delta = normalize_quat_xyzw(q_delta)
-            d_roll, d_pitch, d_yaw = quat_to_rpy_xyzw(q_delta)
-            d_rpy_pika = np.array([d_roll, d_pitch, d_yaw], dtype=np.float64)
-            d_rpy_base = R_map @ d_rpy_pika
+            d_rotvec_pika = quat_to_rotvec_xyzw(q_delta)
+            d_rotvec_base = R_map @ d_rotvec_pika
+            q_delta_base = rotvec_to_quat_xyzw(d_rotvec_base)
+            q_target = normalize_quat_xyzw(quat_mul_xyzw(q_delta_base, q_target))
+            target_roll, target_pitch, target_yaw = quat_to_rpy_xyzw(q_target)
             q_prev = q_cur
 
             dp_pika = clamp_vec(dp_pika, args.max_pika_step_m)
@@ -427,9 +474,6 @@ def main() -> None:
             target_x += float(dp_base[0])
             target_y += float(dp_base[1])
             target_z += float(dp_base[2])
-            target_roll = wrap_to_pi(target_roll + float(d_rpy_base[0]))
-            target_pitch = wrap_to_pi(target_pitch + float(d_rpy_base[1]))
-            target_yaw = wrap_to_pi(target_yaw + float(d_rpy_base[2]))
 
             if args.workspace is not None:
                 x_min, x_max, y_min, y_max, z_min, z_max = args.workspace
