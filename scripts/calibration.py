@@ -25,7 +25,7 @@ import argparse
 import json
 import time
 from dataclasses import dataclass, field
-from typing import Tuple, List
+from typing import Tuple, List, Optional
 
 import numpy as np
 
@@ -129,6 +129,21 @@ class PikaAdapter:
         if quat.shape != (4,):
             raise RuntimeError(f"Unexpected quaternion shape: {quat.shape}")
         return pos, quat
+
+    def get_gripper_distance_mm(self) -> Optional[float]:
+        """
+        Return current PIKA gripper opening distance in mm when available.
+        Returns None if the SDK/firmware cannot provide a valid value.
+        """
+        if self.dev is None:
+            raise RuntimeError("PIKA device is not connected.")
+        try:
+            dist = self.dev.get_gripper_distance()
+        except Exception:
+            return None
+        if dist is None:
+            return None
+        return float(dist)
 
 
 # -----------------------------

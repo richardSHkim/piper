@@ -80,6 +80,10 @@ def clamp_vec(v: np.ndarray, max_norm: float) -> np.ndarray:
     return v * (max_norm / max(n, 1e-12))
 
 
+def clamp_scalar(x: float, lo: float, hi: float) -> float:
+    return min(max(x, lo), hi)
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(
         description="Teleoperate PiPER with PIKA pose increments using calibration json."
@@ -100,6 +104,16 @@ def main() -> None:
 
     parser.add_argument("--max-pika-step-m", type=float, default=0.05, help="Reject/clip sudden tracker jumps")
     parser.add_argument("--max-base-step-m", type=float, default=0.03, help="Clip cartesian increment per cycle")
+    parser.add_argument("--gripper-effort", type=int, default=1000, help="PiPER gripper effort [0..5000]")
+    parser.add_argument(
+        "--piper-gripper-opening-m",
+        type=float,
+        default=0.07,
+        help="PiPER full gripper opening in meters for ratio->stroke mapping",
+    )
+    parser.add_argument("--pika-gripper-min-mm", type=float, default=0.0, help="PIKA gripper mm at fully closed")
+    parser.add_argument("--pika-gripper-max-mm", type=float, default=90.0, help="PIKA gripper mm at fully open")
+    parser.add_argument("--disable-gripper-sync", action="store_true", help="Disable PIKA->PiPER gripper mapping")
     parser.add_argument(
         "--workspace",
         nargs=6,
@@ -116,6 +130,12 @@ def main() -> None:
         raise ValueError("speed-ratio must be in [0, 100]")
     if args.max_pika_step_m <= 0 or args.max_base_step_m <= 0:
         raise ValueError("max step values must be > 0")
+    if not (0 <= args.gripper_effort <= 5000):
+        raise ValueError("gripper-effort must be in [0, 5000]")
+    if args.piper_gripper_opening_m <= 0:
+        raise ValueError("piper-gripper-opening-m must be > 0")
+    if args.pika_gripper_max_mm <= args.pika_gripper_min_mm:
+        raise ValueError("pika-gripper-max-mm must be greater than pika-gripper-min-mm")
 
     R_map, s = load_calib(args.calib)
 
@@ -157,6 +177,8 @@ def main() -> None:
 
         last_log = time.time()
         count = 0
+        gripper_mm = None
+        gripper_ratio = 0.0
         while True:
             p_cur, _ = tracker.get_pose()
             dp_pika = p_cur - p_prev
@@ -185,15 +207,35 @@ def main() -> None:
                 int(round(target_yaw * RAD_TO_001DEG)),
             )
 
+            if not args.disable_gripper_sync:
+                gripper_mm = tracker.get_gripper_distance_mm()
+                if gripper_mm is not None:
+                    gripper_ratio = (gripper_mm - args.pika_gripper_min_mm) / (
+                        args.pika_gripper_max_mm - args.pika_gripper_min_mm
+                    )
+                    gripper_ratio = clamp_scalar(gripper_ratio, 0.0, 1.0)
+                    stroke_001mm = int(round(gripper_ratio * args.piper_gripper_opening_m * M_TO_001MM))
+                    arm.GripperCtrl(abs(stroke_001mm), int(args.gripper_effort), 0x01, 0x00)
+
             count += 1
             now = time.time()
             if now - last_log >= 1.0:
                 hz = count / max(now - last_log, 1e-6)
+                grip_log = (
+                    "grip=disabled"
+                    if args.disable_gripper_sync
+                    else (
+                        "grip=unavailable"
+                        if gripper_mm is None
+                        else f"grip_mm={gripper_mm:.1f}, grip_ratio={gripper_ratio:.2f}"
+                    )
+                )
                 print(
                     f"[run] loop_hz={hz:.1f}, "
                     f"dp_pika={np.linalg.norm(dp_pika):.4f}m, "
                     f"dp_base={np.linalg.norm(dp_base):.4f}m, "
-                    f"target=({target_x:.3f}, {target_y:.3f}, {target_z:.3f})"
+                    f"target=({target_x:.3f}, {target_y:.3f}, {target_z:.3f}), "
+                    f"{grip_log}"
                 )
                 last_log = now
                 count = 0
